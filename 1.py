@@ -751,7 +751,9 @@ async def resolve_multi_round(
     responders = [uid for uid in players if uid in choices]
     used = {choices[uid] for uid in responders}
     winners = set()
-    if len(used) == 2:
+    if len(responders) == 1 and missing:
+        winners = {responders[0]}
+    elif len(used) == 2:
         first, second = tuple(used)
         if BEATS[first] == second:
             winning_choice = first
@@ -763,6 +765,21 @@ async def resolve_multi_round(
             winners = {
                 uid for uid in responders if choices[uid] == winning_choice
             }
+
+    if not responders:
+        room["status"] = "finished"
+        room["round_token"] = None
+        room["final_texts"] = {
+            uid: (
+                "<b>🏁 مسابقه متوقف شد.</b>\n\n"
+                "هیچ بازیکنی در مهلت ۳۰ ثانیه‌ای انتخاب نکرد؛ "
+                "بنابراین مسابقه به دلیل عدم فعالیت پایان یافت."
+            )
+            for uid in players
+        }
+        await refresh_multi_room(context, gid)
+        get_multi_rooms(context).pop(gid, None)
+        return
 
     missing_note = ""
     if missing:
