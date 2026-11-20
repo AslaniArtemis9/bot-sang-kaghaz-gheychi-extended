@@ -1476,12 +1476,17 @@ async def friend_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     gid = query.data.split(":")[1]
     await query.answer()
 
-    if gid not in get_games(context):
+    game = get_games(context).get(gid)
+    if not game:
         await query.edit_message_text(
             "<b>این بازی قبلاً تموم شده.</b>",
             reply_markup=play_back_keyboard(),
             parse_mode=ParseMode.HTML
         )
+        return
+
+    if query.from_user.id not in game["players"]:
+        await query.answer("شما عضو این بازی نیستید.", show_alert=True)
         return
 
     await end_game(context, gid)
