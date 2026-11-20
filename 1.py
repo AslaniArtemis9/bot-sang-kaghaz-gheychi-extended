@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 
 from game_logic import evaluate_multi_round
+from bot_strategy import choose_bot_move
 
 # ---------------- CONFIG ----------------
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -220,6 +221,15 @@ def play_back_keyboard():
     ])
 
 
+def bot_difficulty_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 آسان", callback_data="bot_difficulty:easy")],
+        [InlineKeyboardButton("🟡 متوسط", callback_data="bot_difficulty:medium")],
+        [InlineKeyboardButton("🔴 سخت", callback_data="bot_difficulty:hard")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="play")],
+    ])
+
+
 def game_keyboard():
     """کیبورد بازی با ربات"""
     return InlineKeyboardMarkup([
@@ -402,12 +412,26 @@ def leaderboard_text(rows) -> str:
 
 
 # ----- bot mode texts -----
-def new_bot_match() -> dict:
-    return {"user": 0, "bot": 0, "draw": 0, "round": 1}
+def new_bot_match(difficulty: str = "easy") -> dict:
+    return {
+        "user": 0,
+        "bot": 0,
+        "draw": 0,
+        "round": 1,
+        "difficulty": difficulty,
+        "history": [],
+    }
 
 
 def get_bot_match(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    return context.user_data.setdefault("bot_match", new_bot_match())
+    difficulty = context.user_data.get("bot_difficulty", "easy")
+    return context.user_data.setdefault("bot_match", new_bot_match(difficulty))
+
+
+def bot_difficulty_name(difficulty: str) -> str:
+    return {"easy": "آسان", "medium": "متوسط", "hard": "سخت"}.get(
+        difficulty, "آسان"
+    )
 
 
 def bot_score_line(match: dict) -> str:
@@ -425,6 +449,7 @@ def play_text(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 ━━━━━━━━━━━━━━━━━━
 
+🧠 درجه سختی: <b>{bot_difficulty_name(match.get("difficulty", "easy"))}</b>
 🎯 اولین نفری که به {WIN_SCORE} امتیاز برسه برنده‌ست!
 🎲 دور {match['round']}
 
@@ -1293,14 +1318,27 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def play_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    await query.edit_message_text(
+        "<b>🤖 انتخاب درجه سختی</b>\n\nسطح موردنظرت رو انتخاب کن:",
+        reply_markup=bot_difficulty_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
 
-    # هر بار که وارد بازی با ربات میشی، یه بازی جدید شروع میشه
-    context.user_data["bot_match"] = new_bot_match()
 
+@require_membership
+async def set_bot_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    difficulty = query.data.split(":")[1]
+    if difficulty not in {"easy", "medium", "hard"}:
+        await query.answer("درجه سختی نامعتبر است.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data["bot_difficulty"] = difficulty
+    context.user_data["bot_match"] = new_bot_match(difficulty)
     await query.edit_message_text(
         play_text(context),
         reply_markup=game_keyboard(),
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -1310,13 +1348,21 @@ async def rps_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await query.answer()
 
     user_choice = query.data.split(":")[1]
-    bot_choice = random.choice(list(CHOICES))
+    if user_choice not in CHOICES:
+        await query.answer("انتخاب نامعتبر است.", show_alert=True)
+        return
 
     match = get_bot_match(context)
+    bot_choice = choose_bot_move(
+        match.get("difficulty", "easy"),
+        match.get("history", []),
+        beats=BEATS,
+    )
+    match.setdefault("history", []).append(user_choice)
 
     # اگه بازی قبلی تموم شده بود، از اول شروع کن
     if match["user"] >= WIN_SCORE or match["bot"] >= WIN_SCORE:
-        match = new_bot_match()
+        match = new_bot_match(context.user_data.get("bot_difficulty", "easy"))
         context.user_data["bot_match"] = match
 
     if user_choice == bot_choice:
