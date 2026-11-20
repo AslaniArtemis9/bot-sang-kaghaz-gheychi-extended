@@ -87,6 +87,7 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
         context.bot_data["multi_rooms"] = {
             "active": {"players": [42], "status": "playing"}
         }
+        context.bot = SimpleNamespace()
         query = SimpleNamespace(
             from_user=SimpleNamespace(id=42, first_name="Guest"),
             message=SimpleNamespace(message_id=77),
