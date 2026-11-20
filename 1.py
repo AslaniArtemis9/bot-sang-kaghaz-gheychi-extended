@@ -647,6 +647,19 @@ def get_multi_rooms(context: ContextTypes.DEFAULT_TYPE) -> dict:
     return context.bot_data.setdefault("multi_rooms", {})
 
 
+def user_has_active_competitive_game(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> bool:
+    """Return whether a user is already in any active human-vs-human mode."""
+    if user_id in get_user_game(context):
+        return True
+    if any(user_id in room.get("players", []) for room in get_multi_rooms(context).values()):
+        return True
+    if user_id in get_group_two_user_game(context):
+        return True
+    return False
+
+
 def multi_room_text(room: dict) -> str:
     names = "\n".join(
         f"{i}. {esc(room['names'].get(uid, 'بازیکن'))}"
@@ -884,9 +897,10 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
     if len(room["players"]) >= room["capacity"]:
         await context.bot.send_message(user.id, "ظرفیت این اتاق تکمیل شده است.")
         return
-    if any(user.id in other["players"] for other in rooms.values()):
+    if user_has_active_competitive_game(context, user.id):
         await context.bot.send_message(
-            user.id, "ابتدا از اتاق چندنفرهٔ فعلی خود خارج شوید.",
+            user.id,
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
             reply_markup=back_keyboard()
         )
         return
@@ -1148,9 +1162,9 @@ async def group_game_create(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     user_games = get_group_two_user_game(context)
-    if user.id in user_games:
+    if user_has_active_competitive_game(context, user.id):
         await update.message.reply_text(
-            "شما در حال حاضر در یک مسابقهٔ گروهی دیگر شرکت دارید."
+            "شما از قبل در یک مسابقهٔ دونفره یا چندنفره شرکت دارید؛ ابتدا آن را تمام کنید."
         )
         return
 
@@ -1196,8 +1210,10 @@ async def group_two_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if uid == game["host"]:
         await query.answer("سازندهٔ مسابقه از قبل بازیکن اول است.", show_alert=True)
         return
-    if uid in get_group_two_user_game(context):
-        await query.answer("شما در یک مسابقهٔ گروهی دیگر شرکت دارید.", show_alert=True)
+    if user_has_active_competitive_game(context, uid):
+        await query.answer(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید.", show_alert=True
+        )
         return
 
     game["players"].append(uid)
@@ -1314,9 +1330,9 @@ async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.answer("ظرفیت نامعتبر است.", show_alert=True)
         return
     user = query.from_user
-    if any(user.id in room["players"] for room in get_multi_rooms(context).values()):
+    if user_has_active_competitive_game(context, user.id):
         await query.answer(
-            "شما از قبل عضو یک اتاق چندنفره هستید؛ ابتدا آن را ترک یا لغو کنید.",
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
             show_alert=True,
         )
         return
@@ -1487,10 +1503,13 @@ async def join_game(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
         )
         return
 
-    # اگه این کاربر توی بازی دیگه‌ای بود، اون بازی تموم میشه
-    old = user_game.get(user.id)
-    if old:
-        await end_game(context, old)
+    if user_has_active_competitive_game(context, user.id):
+        await context.bot.send_message(
+            user.id,
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            reply_markup=back_keyboard(),
+        )
+        return
 
     host = game["players"][0]
     game["players"].append(user.id)
@@ -1784,11 +1803,14 @@ async def play_friend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     user = query.from_user
 
-    user_game = get_user_game(context)
-    old = user_game.get(user.id)
-    if old:
-        await end_game(context, old)
+    if user_has_active_competitive_game(context, user.id):
+        await query.answer(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            show_alert=True,
+        )
+        return
 
+    user_game = get_user_game(context)
     gid = secrets.token_hex(4)
     get_games(context)[gid] = {
         "players": [user.id],
