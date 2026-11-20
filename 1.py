@@ -748,7 +748,7 @@ def schedule_multi_round_timeout(context: ContextTypes.DEFAULT_TYPE, gid: str) -
         return
     token = secrets.token_hex(8)
     room["round_token"] = token
-    context.application.create_task(
+    asyncio.create_task(
         multi_round_timeout(context, gid, token),
         name=f"multi-timeout-{gid}-{room['round']}",
     )
