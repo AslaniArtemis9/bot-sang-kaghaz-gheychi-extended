@@ -1806,7 +1806,6 @@ async def rps_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @require_membership
 async def play_friend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     user = query.from_user
 
     if user_has_active_competitive_game(context, user.id):
@@ -1816,6 +1815,7 @@ async def play_friend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+    await query.answer()
     user_game = get_user_game(context)
     gid = secrets.token_hex(4)
     get_games(context)[gid] = {
