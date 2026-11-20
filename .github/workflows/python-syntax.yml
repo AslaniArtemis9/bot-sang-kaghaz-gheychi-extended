@@ -1,0 +1,32 @@
+name: Python syntax check
+
+on:
+  push:
+    branches:
+      - feature/multiplayer-stage-1
+      - feature/bot-difficulty-stage-1
+      - feature/group-two-player-stage-2
+  pull_request:
+    branches:
+      - main
+      - feature/multiplayer-stage-1
+      - feature/group-two-player-stage-2
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile Python source
+        run: python -m py_compile 1.py game_logic.py bot_strategy.py
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

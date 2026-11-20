@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local bot database (contains player identifiers and statistics)
+stats.db
+stats.db-*
+*.sqlite3

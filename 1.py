@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import os
@@ -18,6 +19,9 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+
+from game_logic import evaluate_multi_round, evaluate_two_player_round
+from bot_strategy import choose_bot_move
 
 # ---------------- CONFIG ----------------
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -52,6 +56,7 @@ BEATS = {
 
 # اولین کسی که به این تعداد امتیاز برسه، برنده‌ی بازی میشه
 WIN_SCORE = 3
+MULTI_ROUND_TIMEOUT_SECONDS = 30
 
 
 # ---------------- DATABASE ----------------
@@ -180,14 +185,48 @@ def ads_keyboard():
 def play_mode_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🤖 بازی با ربات", callback_data="play_bot")],
-        [InlineKeyboardButton("👥 بازی با دوستان", callback_data="play_friend")],
+        [InlineKeyboardButton("👥 بازی دونفره با دوستان", callback_data="play_friend")],
+        [InlineKeyboardButton("🌐 بازی چندنفره", callback_data="play_multi")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="menu")],
+    ])
+
+
+def multi_capacity_keyboard():
+    rows = []
+    values = list(range(3, 21))
+    for i in range(0, len(values), 3):
+        rows.append([
+            InlineKeyboardButton(f"{n} نفر", callback_data=f"multi_cap:{n}")
+            for n in values[i:i + 3]
+        ])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="play")])
+    return InlineKeyboardMarkup(rows)
+
+
+def multi_room_keyboard(gid: str, link: str):
+    share_url = "https://t.me/share/url?" + urlencode(
+        {"url": link, "text": "بیا به مسابقه چندنفره سنگ کاغذ قیچی بپیوند! 🎮"},
+        quote_via=quote,
+    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ شروع مسابقه", callback_data=f"multi_start:{gid}")],
+        [InlineKeyboardButton("📤 ارسال لینک دعوت", url=share_url)],
+        [InlineKeyboardButton("❌ لغو اتاق", callback_data=f"multi_cancel:{gid}")],
     ])
 
 
 def play_back_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت به منوی بازی", callback_data="play")]
+    ])
+
+
+def bot_difficulty_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 آسان", callback_data="bot_difficulty:easy")],
+        [InlineKeyboardButton("🟡 متوسط", callback_data="bot_difficulty:medium")],
+        [InlineKeyboardButton("🔴 سخت", callback_data="bot_difficulty:hard")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="play")],
     ])
 
 
@@ -373,12 +412,26 @@ def leaderboard_text(rows) -> str:
 
 
 # ----- bot mode texts -----
-def new_bot_match() -> dict:
-    return {"user": 0, "bot": 0, "draw": 0, "round": 1}
+def new_bot_match(difficulty: str = "easy") -> dict:
+    return {
+        "user": 0,
+        "bot": 0,
+        "draw": 0,
+        "round": 1,
+        "difficulty": difficulty,
+        "history": [],
+    }
 
 
 def get_bot_match(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    return context.user_data.setdefault("bot_match", new_bot_match())
+    difficulty = context.user_data.get("bot_difficulty", "easy")
+    return context.user_data.setdefault("bot_match", new_bot_match(difficulty))
+
+
+def bot_difficulty_name(difficulty: str) -> str:
+    return {"easy": "آسان", "medium": "متوسط", "hard": "سخت"}.get(
+        difficulty, "آسان"
+    )
 
 
 def bot_score_line(match: dict) -> str:
@@ -396,6 +449,7 @@ def play_text(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 ━━━━━━━━━━━━━━━━━━
 
+🧠 درجه سختی: <b>{bot_difficulty_name(match.get("difficulty", "easy"))}</b>
 🎯 اولین نفری که به {WIN_SCORE} امتیاز برسه برنده‌ست!
 🎲 دور {match['round']}
 
@@ -589,53 +643,283 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
             )
 
 
-async def join_game(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
-    games = get_games(context)
-    user_game = get_user_game(context)
-    game = games.get(gid)
+def get_multi_rooms(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("multi_rooms", {})
 
-    if not game or game["status"] != "waiting":
+
+def user_has_active_competitive_game(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> bool:
+    """Return whether a user is already in any active human-vs-human mode."""
+    if user_id in get_user_game(context):
+        return True
+    if any(user_id in room.get("players", []) for room in get_multi_rooms(context).values()):
+        return True
+    if user_id in get_group_two_user_game(context):
+        return True
+    return False
+
+
+def multi_room_text(room: dict) -> str:
+    names = "\n".join(
+        f"{i}. {esc(room['names'].get(uid, 'بازیکن'))}"
+        for i, uid in enumerate(room["players"], 1)
+    )
+    status_text = (
+        "⏳ اتاق در انتظار ورود بازیکنان است.\n"
+        "پس از حضور حداقل ۳ نفر، سازنده می‌تواند مسابقه را شروع کند."
+    )
+    return (
+        "<b>🌐 اتاق بازی چندنفره</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 بازیکنان: {len(room['players'])} از {room['capacity']}\n\n"
+        f"{names}\n\n"
+        f"{status_text}"
+    )
+
+
+def multi_game_text(room: dict, uid: int, note: str = "") -> str:
+    scores = "\n".join(
+        f"{esc(room['names'].get(pid, 'بازیکن'))}: {room['scores'][pid]} امتیاز"
+        for pid in room["players"]
+    )
+    chosen = len(room["choices"])
+    total = len(room["players"])
+    if uid in room["choices"]:
+        choice_text = "✅ انتخابت ثبت شده؛ منتظر بقیه بازیکنان باش."
+    else:
+        choice_text = "👇 حرکت این دور را انتخاب کن."
+    return (
+        "<b>🌐 مسابقهٔ چندنفره</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎲 دور {room['round']}\n"
+        f"📊 انتخاب‌ها ثبت‌شده: {chosen} از {total}\n"
+        f"⏱ مهلت انتخاب: {MULTI_ROUND_TIMEOUT_SECONDS} ثانیه\n"
+        f"🤝 دورهای مساوی: {room['draws']}\n\n"
+        f"{scores}\n\n"
+        f"{note}{choice_text}"
+    )
+
+
+def multi_waiting_player_keyboard(gid: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚪 خروج از اتاق", callback_data=f"multi_leave:{gid}")]
+    ])
+
+
+def multi_player_keyboard(gid: str, round_token: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"{emoji} {name}", callback_data=f"multi_choice:{gid}:{round_token}:{key}")
+            for key, (emoji, name) in CHOICES.items()
+        ]
+    ])
+
+
+async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room:
+        return
+    for uid in list(room["players"]):
+        message_id = room["messages"].get(uid)
+        if not message_id:
+            continue
+        if room["status"] == "waiting":
+            text = multi_room_text(room)
+            keyboard = (
+                multi_room_keyboard(gid, room["link"])
+                if uid == room["host"] else multi_waiting_player_keyboard(gid)
+            )
+        elif room["status"] == "playing":
+            text = multi_game_text(room, uid)
+            keyboard = (
+                multi_player_keyboard(gid, room["round_token"])
+                if uid not in room["choices"] else None
+            )
+        else:
+            text = room["final_texts"].get(uid, "<b>🏁 مسابقه تمام شد.</b>")
+            keyboard = None
+        await safe_edit(context.bot, uid, message_id, text, keyboard)
+
+
+def schedule_multi_round_timeout(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room or room["status"] != "playing":
+        return
+    token = secrets.token_hex(8)
+    room["round_token"] = token
+    context.application.create_task(
+        multi_round_timeout(context, gid, token),
+        name=f"multi-timeout-{gid}-{room['round']}",
+    )
+
+
+async def multi_round_timeout(
+    context: ContextTypes.DEFAULT_TYPE, gid: str, token: str
+) -> None:
+    await asyncio.sleep(MULTI_ROUND_TIMEOUT_SECONDS)
+    room = get_multi_rooms(context).get(gid)
+    if (
+        not room
+        or room["status"] != "playing"
+        or room.get("round_token") != token
+    ):
+        return
+    await resolve_multi_round(
+        context, gid, timed_out=True, expected_token=token
+    )
+
+
+async def resolve_multi_round(
+    context: ContextTypes.DEFAULT_TYPE,
+    gid: str,
+    timed_out: bool = False,
+    expected_token=None,
+) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room or room["status"] != "playing":
+        return
+    if expected_token is None or room.get("round_token") != expected_token:
+        return
+
+    players = list(room["players"])
+    choices = dict(room["choices"])
+    if not timed_out and len(choices) != len(players):
+        return
+
+    # Invalidate this round before the first await so timeout and final-choice
+    # callbacks cannot resolve the same round twice.
+    room["round_token"] = None
+
+    missing = [uid for uid in players if uid not in choices]
+    responders = [uid for uid in players if uid in choices]
+    winners = evaluate_multi_round(players, choices, BEATS)
+
+    if not responders:
+        room["status"] = "finished"
+        room["round_token"] = None
+        room["final_texts"] = {
+            uid: (
+                "<b>🏁 مسابقه متوقف شد.</b>\n\n"
+                "هیچ بازیکنی در مهلت ۳۰ ثانیه‌ای انتخاب نکرد؛ "
+                "بنابراین مسابقه به دلیل عدم فعالیت پایان یافت."
+            )
+            for uid in players
+        }
+        await refresh_multi_room(context, gid)
+        get_multi_rooms(context).pop(gid, None)
+        return
+
+    missing_note = ""
+    if missing:
+        missing_names = "، ".join(
+            esc(room["names"].get(uid, "بازیکن")) for uid in missing
+        )
+        missing_note = (
+            f"⏰ مهلت تمام شد؛ این بازیکنان انتخاب نکردند و این دور را از دست دادند: "
+            f"{missing_names}.\n"
+        )
+
+    if winners:
+        for uid in winners:
+            room["scores"][uid] += 1
+        result_note = (
+            missing_note
+            + "🏆 برندهٔ این دور: "
+            + "، ".join(esc(room["names"].get(uid, "بازیکن")) for uid in winners)
+            + "\n\n"
+        )
+    elif len(responders) < 2:
+        result_note = (
+            missing_note
+            + "⚠️ برای تعیین برنده، حداقل دو انتخاب لازم بود؛ امتیازی داده نشد.\n\n"
+        )
+    else:
+        room["draws"] += 1
+        result_note = (
+            missing_note
+            + "🤝 این دور مساوی شد؛ امتیازی داده نشد.\n\n"
+        )
+
+    room["last_choices"] = choices
+    room["round"] += 1
+    room["choices"] = {}
+
+    champions = [uid for uid in players if room["scores"][uid] >= WIN_SCORE]
+    if champions:
+        room["status"] = "finished"
+        room["round_token"] = None
+        champion_names = "، ".join(
+            esc(room["names"].get(uid, "بازیکن")) for uid in champions
+        )
+        room["final_texts"] = {}
+        for uid in players:
+            won = uid in champions
+            verdict = "🎉 تو برندهٔ مسابقه شدی!" if won else "این بار برنده نشدی."
+            room["final_texts"][uid] = (
+                "<b>🏁 مسابقه تمام شد!</b>\n\n"
+                f"🏆 برنده: {champion_names}\n"
+                f"{verdict}\n\n"
+                f"امتیاز تو: {room['scores'][uid]} از {WIN_SCORE}"
+            )
+            record_result(
+                uid,
+                room["names"].get(uid, "بازیکن"),
+                won=won,
+            )
+        await refresh_multi_room(context, gid)
+        get_multi_rooms(context).pop(gid, None)
+        return
+
+    room["round_note"] = result_note
+    schedule_multi_round_timeout(context, gid)
+    for uid in players:
+        message_id = room["messages"].get(uid)
+        if message_id:
+            await safe_edit(
+                context.bot, uid, message_id,
+                multi_game_text(room, uid, note=result_note),
+                multi_player_keyboard(gid, room["round_token"]) if uid not in room["choices"] else None,
+            )
+
+async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
+    rooms = get_multi_rooms(context)
+    room = rooms.get(gid)
+    if not room or room["status"] != "waiting":
+        await context.bot.send_message(
+            user.id, "❌ این اتاق وجود ندارد یا دیگر پذیرای بازیکن نیست.",
+            reply_markup=back_keyboard()
+        )
+        return
+    if user.id in room["players"]:
+        await context.bot.send_message(user.id, "شما از قبل عضو این اتاق هستید.")
+        return
+    if len(room["players"]) >= room["capacity"]:
+        await context.bot.send_message(user.id, "ظرفیت این اتاق تکمیل شده است.")
+        return
+    if any(user.id in other["players"] for other in rooms.values()):
+        await context.bot.send_message(
+            user.id, "ابتدا از اتاق چندنفرهٔ فعلی خود خارج شوید.",
+            reply_markup=back_keyboard()
+        )
+        return
+    if user_has_active_competitive_game(context, user.id):
         await context.bot.send_message(
             user.id,
-            "<b>😕 این بازی دیگه معتبر نیست.</b>\n\nلینک منقضی شده یا بازی قبلاً شروع شده.",
-            reply_markup=back_keyboard(),
-            parse_mode=ParseMode.HTML,
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            reply_markup=back_keyboard()
         )
         return
 
-    if user.id in game["players"]:
-        await context.bot.send_message(
-            user.id,
-            "😅 نمی‌تونی با خودت بازی کنی! لینک رو برای دوستت بفرست.",
-            reply_markup=back_keyboard(),
-        )
-        return
-
-    # اگه این کاربر توی بازی دیگه‌ای بود، اون بازی تموم میشه
-    old = user_game.get(user.id)
-    if old:
-        await end_game(context, old)
-
-    host = game["players"][0]
-    game["players"].append(user.id)
-    game["names"][user.id] = user.first_name
-    game["scores"][user.id] = 0
-    game["status"] = "playing"
-    user_game[user.id] = gid
-
+    room["players"].append(user.id)
+    room["names"][user.id] = user.first_name or "بازیکن"
     msg = await context.bot.send_message(
-        user.id,
-        friend_round_text(game, user.id),
-        reply_markup=friend_game_keyboard(gid),
-        parse_mode=ParseMode.HTML,
+        user.id, multi_room_text(room), parse_mode=ParseMode.HTML,
+        reply_markup=multi_waiting_player_keyboard(gid)
     )
-    game["msgs"][user.id] = msg.message_id
+    room["messages"][user.id] = msg.message_id
+    await refresh_multi_room(context, gid)
 
-    await safe_edit(
-        context.bot, host, game["msgs"][host],
-        friend_round_text(game, host, note="✅ حریفت وصل شد!\n\n"),
-        friend_game_keyboard(gid),
-    )
 
 
 # ---------------- DECORATOR ----------------
@@ -661,11 +945,15 @@ def require_membership(handler):
                 "🔒 برای استفاده از ربات باید عضو کانال باشی!",
                 show_alert=True
             )
-            await query.edit_message_text(
-                JOIN_TEXT,
-                reply_markup=join_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
+            chat = update.effective_chat
+            # Never replace a shared group-game message with a private
+            # membership prompt when a non-member presses its buttons.
+            if not chat or chat.type not in ("group", "supergroup"):
+                await query.edit_message_text(
+                    JOIN_TEXT,
+                    reply_markup=join_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
         elif update.message:
             await update.message.reply_text(
                 JOIN_TEXT,
@@ -675,6 +963,581 @@ def require_membership(handler):
 
     return wrapper
 
+# ---------------- GROUP TWO-PLAYER MODE ----------------
+
+def get_group_two_games(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("group_two_games", {})
+
+
+def get_group_two_user_game(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("group_two_user_game", {})
+
+
+def group_two_text(game: dict, note: str = "") -> str:
+    players = game["players"]
+    names = "  🆚  ".join(esc(game["names"][uid]) for uid in players)
+    registered = len(game["choices"])
+    if game["status"] == "waiting":
+        return (
+            "<b>👥 مسابقهٔ دونفره در گروه</b>\\n\\n"
+            "━━━━━━━━━━━━━━━━━━\\n\\n"
+            f"👤 بازیکن اول: {esc(game['names'][players[0]])}\\n"
+            "⏳ منتظر ورود یک بازیکن دیگر...\\n\\n"
+            "برای شرکت، دکمهٔ «ورود به بازی» را بزنید."
+        )
+    if game["status"] == "playing":
+        return (
+            "<b>👥 مسابقهٔ دونفره در گروه</b>\\n\\n"
+            "━━━━━━━━━━━━━━━━━━\\n\\n"
+            f"{names}\\n\\n"
+            f"🎲 دور {game['round']}\\n"
+            f"🏆 {esc(game['names'][players[0]])}: {game['scores'][players[0]]}  |  "
+            f"{esc(game['names'][players[1]])}: {game['scores'][players[1]]}\\n"
+            f"🤝 مساوی: {game['draws']}\\n"
+            f"📥 انتخاب‌های ثبت‌شده: {registered}/2\\n"
+            f"⏱ مهلت هر دور: {MULTI_ROUND_TIMEOUT_SECONDS} ثانیه\\n\\n"
+            f"{note}"
+            "انتخاب‌ها تا پایان دور مخفی می‌مانند. حرکتت را انتخاب کن 👇"
+        )
+    return (game.get("final_text", "<b>🏁 مسابقه تمام شد.</b>") + "\\n\\n" + game.get("round_note", ""))
+
+
+def group_two_keyboard(gid: str, game: dict):
+    if game["status"] == "waiting":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🙋 ورود به بازی", callback_data=f"g2_join:{gid}")],
+            [InlineKeyboardButton("❌ لغو مسابقه", callback_data=f"g2_end:{gid}")],
+        ])
+    if game["status"] == "playing":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"{emoji} {name}",
+                    callback_data=f"g2_choice:{gid}:{game['round_token']}:{key}",
+                )
+                for key, (emoji, name) in CHOICES.items()
+            ],
+            [InlineKeyboardButton("🚪 پایان مسابقه", callback_data=f"g2_end:{gid}")],
+        ])
+    return None
+
+
+async def refresh_group_two_game(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if not game:
+        return
+    await safe_edit(
+        context.bot,
+        chat_id,
+        game["message_id"],
+        group_two_text(game, game.get("round_note", "")),
+        group_two_keyboard(game["gid"], game),
+    )
+
+
+def schedule_group_two_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    token = secrets.token_hex(8)
+    game["round_token"] = token
+    context.application.create_task(
+        group_two_round_timeout(context, chat_id, token),
+        name=f"group-two-timeout-{chat_id}-{game['round']}",
+    )
+
+
+async def group_two_round_timeout(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, token: str
+) -> None:
+    await asyncio.sleep(MULTI_ROUND_TIMEOUT_SECONDS)
+    game = get_group_two_games(context).get(chat_id)
+    if (
+        not game
+        or game["status"] != "playing"
+        or game.get("round_token") != token
+    ):
+        return
+    await resolve_group_two_round(
+        context, chat_id, timed_out=True, expected_token=token
+    )
+
+
+async def resolve_group_two_round(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    timed_out: bool = False,
+    expected_token=None,
+) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if (
+        not game
+        or game["status"] != "playing"
+        or expected_token is None
+        or game.get("round_token") != expected_token
+    ):
+        return
+
+    players = list(game["players"])
+    choices = dict(game["choices"])
+    if not timed_out and len(choices) != 2:
+        return
+
+    # Invalidate before awaiting Telegram so a timeout/callback cannot score twice.
+    game["round_token"] = None
+    winner = evaluate_two_player_round(players, choices, BEATS)
+
+    if not choices:
+        game["status"] = "finished"
+        game["final_text"] = (
+            "<b>🏁 مسابقه متوقف شد.</b>\\n\\n"
+            "هیچ‌کدام از بازیکنان در مهلت مقرر انتخاب نکردند."
+        )
+        await refresh_group_two_game(context, chat_id)
+        get_group_two_games(context).pop(chat_id, None)
+        for uid in players:
+            get_group_two_user_game(context).pop(uid, None)
+        return
+
+    result_note = ""
+    if timed_out and len(choices) == 1:
+        result_note = "⏰ مهلت تمام شد؛ بازیکنی که انتخاب کرد این دور را برد.\\n\\n"
+    if winner is None:
+        game["draws"] += 1
+        result_note += "🤝 این دور مساوی شد.\\n\\n"
+    else:
+        game["scores"][winner] += 1
+        result_note += f"🏆 برندهٔ این دور: {esc(game['names'][winner])}\\n\\n"
+
+    reveal = []
+    for uid in players:
+        if uid in choices:
+            emoji, name = CHOICES[choices[uid]]
+            reveal.append(f"{esc(game['names'][uid])}: {emoji} {name}")
+        else:
+            reveal.append(f"{esc(game['names'][uid])}: انتخاب نکرد")
+    result_note += "🔎 نتیجهٔ انتخاب‌ها:\\n" + "\\n".join(reveal) + "\\n\\n"
+
+    game["round"] += 1
+    game["choices"] = {}
+    champions = [uid for uid in players if game["scores"][uid] >= WIN_SCORE]
+    if champions:
+        game["status"] = "finished"
+        champion = champions[0]
+        game["final_text"] = (
+            "<b>🏁 مسابقه تمام شد!</b>\\n\\n"
+            f"🏆 برندهٔ نهایی: {esc(game['names'][champion])}\\n"
+            f"📊 نتیجه: {esc(game['names'][players[0]])} "
+            f"{game['scores'][players[0]]} - {game['scores'][players[1]]} "
+            f"{esc(game['names'][players[1]])}"
+        )
+        for uid in players:
+            record_result(
+                uid,
+                game["names"][uid],
+                won=(uid == champion),
+            )
+        game["round_note"] = result_note
+        await refresh_group_two_game(context, chat_id)
+        get_group_two_games(context).pop(chat_id, None)
+        for uid in players:
+            get_group_two_user_game(context).pop(uid, None)
+        return
+
+    game["round_note"] = result_note
+    schedule_group_two_timeout(context, chat_id)
+    await refresh_group_two_game(context, chat_id)
+
+
+@require_membership
+async def group_game_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text(
+            "این دستور را داخل گروه تلگرام اجرا کن."
+        )
+        return
+
+    games = get_group_two_games(context)
+    existing = games.get(chat.id)
+    if existing:
+        await update.message.reply_text(
+            "در این گروه یک مسابقهٔ دونفره فعال یا در حال انتظار است."
+        )
+        return
+
+    user_games = get_group_two_user_game(context)
+    if user_has_active_competitive_game(context, user.id):
+        await update.message.reply_text(
+            "شما از قبل در یک مسابقهٔ دونفره یا چندنفره شرکت دارید؛ ابتدا آن را تمام کنید."
+        )
+        return
+
+    gid = secrets.token_hex(4)
+    game = {
+        "gid": gid,
+        "chat_id": chat.id,
+        "message_id": None,
+        "host": user.id,
+        "players": [user.id],
+        "names": {user.id: user.first_name or "بازیکن"},
+        "scores": {user.id: 0},
+        "choices": {},
+        "draws": 0,
+        "round": 1,
+        "round_token": None,
+        "round_note": "",
+        "status": "waiting",
+    }
+    message = await update.message.reply_text(
+        group_two_text(game),
+        reply_markup=group_two_keyboard(gid, game),
+        parse_mode=ParseMode.HTML,
+    )
+    game["message_id"] = message.message_id
+    games[chat.id] = game
+    user_games[user.id] = chat.id
+
+
+@require_membership
+async def group_two_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    game = get_group_two_games(context).get(chat.id)
+    gid = query.data.split(":")[1]
+    if not game or game["gid"] != gid or game["status"] != "waiting":
+        await query.answer("این مسابقه دیگر در انتظار بازیکن نیست.", show_alert=True)
+        return
+    uid = query.from_user.id
+    if uid == game["host"]:
+        await query.answer("سازندهٔ مسابقه از قبل بازیکن اول است.", show_alert=True)
+        return
+    if user_has_active_competitive_game(context, uid):
+        await query.answer(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید.", show_alert=True
+        )
+        return
+
+    game["players"].append(uid)
+    game["names"][uid] = query.from_user.first_name or "بازیکن"
+    game["scores"][uid] = 0
+    get_group_two_user_game(context)[uid] = chat.id
+    game["status"] = "playing"
+    schedule_group_two_timeout(context, chat.id)
+    try:
+        await query.answer("وارد مسابقه شدی؛ بازی شروع شد!")
+    except TelegramError as e:
+        logger.warning("group join callback answer failed for %s: %s", uid, e)
+    await refresh_group_two_game(context, chat.id)
+
+
+@require_membership
+async def group_two_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    _, gid, token, choice = query.data.split(":")
+    game = get_group_two_games(context).get(chat.id)
+    uid = query.from_user.id
+    if (
+        not game
+        or game["gid"] != gid
+        or game["status"] != "playing"
+        or uid not in game["players"]
+        or game.get("round_token") != token
+    ):
+        await query.answer("این انتخاب دیگر معتبر نیست.", show_alert=True)
+        return
+    if uid in game["choices"]:
+        await query.answer("انتخابت قبلاً ثبت شده است.", show_alert=True)
+        return
+    if choice not in CHOICES:
+        await query.answer("حرکت نامعتبر است.", show_alert=True)
+        return
+
+    game["choices"][uid] = choice
+    try:
+        await query.answer("انتخابت مخفیانه ثبت شد.")
+    except TelegramError as e:
+        logger.warning("group choice callback answer failed for %s: %s", uid, e)
+    if len(game["choices"]) == 2:
+        await resolve_group_two_round(
+            context, chat.id, expected_token=token
+        )
+    else:
+        await refresh_group_two_game(context, chat.id)
+
+
+@require_membership
+async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    gid = query.data.split(":")[1]
+    game = get_group_two_games(context).get(chat.id)
+    uid = query.from_user.id
+    if not game or game["gid"] != gid:
+        await query.answer("این مسابقه دیگر فعال نیست.", show_alert=True)
+        return
+    if uid not in game["players"]:
+        await query.answer("فقط بازیکنان مسابقه می‌توانند آن را پایان دهند.", show_alert=True)
+        return
+
+    # Close the state before yielding so a round timeout cannot resolve
+    # concurrently with a player's request to end the match.
+    was_playing = game["status"] == "playing"
+    game["status"] = "finished"
+    game["round_token"] = None
+    try:
+        await query.answer("مسابقه پایان یافت.")
+    except TelegramError as e:
+        logger.warning("group end callback answer failed for %s: %s", uid, e)
+    if was_playing and len(game["players"]) == 2:
+        other = next(pid for pid in game["players"] if pid != uid)
+        game["final_text"] = (
+            "<b>🏁 مسابقه با انصراف پایان یافت.</b>\\n\\n"
+            f"🏆 برنده: {esc(game['names'][other])}"
+        )
+        for pid in game["players"]:
+            record_result(pid, game["names"][pid], won=(pid == other))
+    else:
+        game["final_text"] = "<b>❌ مسابقه توسط سازنده لغو شد.</b>"
+
+    await refresh_group_two_game(context, chat.id)
+    get_group_two_games(context).pop(chat.id, None)
+    for pid in game["players"]:
+        get_group_two_user_game(context).pop(pid, None)
+
+
+@require_membership
+async def play_multi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "<b>🌐 ساخت اتاق چندنفره</b>\n\nظرفیت اتاق را انتخاب کن (۳ تا ۲۰ بازیکن):",
+        reply_markup=multi_capacity_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
+
+@require_membership
+async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    capacity = int(query.data.split(":")[1])
+    if not 3 <= capacity <= 20:
+        await query.answer("ظرفیت نامعتبر است.", show_alert=True)
+        return
+    user = query.from_user
+    if user_has_active_competitive_game(context, user.id):
+        await query.answer(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            show_alert=True,
+        )
+        return
+
+    gid = secrets.token_hex(4)
+    link = f"https://t.me/{context.bot.username}?start=mjoin_{gid}"
+    room = {
+        "host": user.id,
+        "host_message_id": query.message.message_id,
+        "players": [user.id],
+        "names": {user.id: user.first_name or "بازیکن"},
+        "messages": {user.id: query.message.message_id},
+        "capacity": capacity,
+        "status": "waiting",
+        "link": link,
+    }
+    get_multi_rooms(context)[gid] = room
+    await query.answer("اتاق ساخته شد!")
+    await query.edit_message_text(
+        multi_room_text(room),
+        reply_markup=multi_room_keyboard(gid, link),
+        parse_mode=ParseMode.HTML
+    )
+
+
+@require_membership
+async def multi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gid = query.data.split(":")[1]
+    room = get_multi_rooms(context).get(gid)
+
+    if not room or room["status"] != "waiting":
+        await query.answer("این اتاق دیگر در وضعیت انتظار نیست.", show_alert=True)
+        return
+    if query.from_user.id != room["host"]:
+        await query.answer("فقط سازندهٔ اتاق می‌تواند مسابقه را شروع کند.", show_alert=True)
+        return
+    if len(room["players"]) < 3:
+        await query.answer(
+            f"برای شروع حداقل ۳ نفر لازم است؛ اکنون {len(room['players'])} نفر حضور دارند.",
+            show_alert=True,
+        )
+        return
+
+    room["status"] = "playing"
+    room["scores"] = {uid: 0 for uid in room["players"]}
+    room["choices"] = {}
+    room["draws"] = 0
+    room["round"] = 1
+    room["last_choices"] = {}
+    room["final_texts"] = {}
+    room["round_note"] = ""
+    room["round_token"] = None
+    schedule_multi_round_timeout(context, gid)
+    await query.answer("مسابقه شروع شد!")
+    await refresh_multi_room(context, gid)
+
+
+@require_membership
+async def multi_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, gid, round_token, choice = query.data.split(":")
+    room = get_multi_rooms(context).get(gid)
+    uid = query.from_user.id
+
+    if not room or room["status"] != "playing":
+        await query.answer("این مسابقه فعال نیست.", show_alert=True)
+        return
+    if room.get("round_token") != round_token:
+        await query.answer("مهلت یا دور این انتخاب تمام شده است؛ از دکمه‌های دور جدید استفاده کن.", show_alert=True)
+        return
+    if uid not in room["players"]:
+        await query.answer("شما عضو این مسابقه نیستید.", show_alert=True)
+        return
+    if choice not in CHOICES:
+        await query.answer("انتخاب نامعتبر است.", show_alert=True)
+        return
+    if uid in room["choices"]:
+        await query.answer("انتخاب این دورت قبلاً ثبت شده است.")
+        return
+
+    # Record the choice before yielding to Telegram. The timeout may wake
+    # immediately after this point, so the resolver is tied to this round token.
+    room["choices"][uid] = choice
+    try:
+        await query.answer("انتخابت ثبت شد.")
+    except TelegramError as e:
+        # A failed callback acknowledgement must not discard an accepted move.
+        logger.warning("callback answer failed for %s: %s", uid, e)
+    if len(room["choices"]) == len(room["players"]):
+        await resolve_multi_round(context, gid, expected_token=round_token)
+    else:
+        await refresh_multi_room(context, gid)
+
+
+@require_membership
+async def multi_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gid = query.data.split(":")[1]
+    room = get_multi_rooms(context).get(gid)
+    uid = query.from_user.id
+    if not room or room["status"] != "waiting":
+        await query.answer("این اتاق دیگر فعال نیست.", show_alert=True)
+        return
+    if uid == room["host"]:
+        await query.answer("سازنده نمی‌تواند خارج شود؛ در صورت نیاز اتاق را لغو کند.", show_alert=True)
+        return
+    if uid not in room["players"]:
+        await query.answer("شما عضو این اتاق نیستید.", show_alert=True)
+        return
+
+    room["players"].remove(uid)
+    room["names"].pop(uid, None)
+    room["messages"].pop(uid, None)
+    await query.answer("از اتاق خارج شدی.")
+    await query.edit_message_text(
+        "🚪 از اتاق چندنفره خارج شدی.",
+        reply_markup=play_back_keyboard()
+    )
+    await refresh_multi_room(context, gid)
+
+
+@require_membership
+async def multi_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gid = query.data.split(":")[1]
+    room = get_multi_rooms(context).get(gid)
+    if not room:
+        await query.answer("این اتاق قبلاً بسته شده است.", show_alert=True)
+        return
+    if query.from_user.id != room["host"]:
+        await query.answer("فقط سازندهٔ اتاق می‌تواند آن را لغو کند.", show_alert=True)
+        return
+    if room["status"] != "waiting":
+        await query.answer("مسابقه شروع شده و دیگر قابل لغو از این بخش نیست.", show_alert=True)
+        return
+    get_multi_rooms(context).pop(gid, None)
+    await query.answer("اتاق لغو شد.")
+    for uid in list(room["players"]):
+        message_id = room["messages"].get(uid)
+        if message_id:
+            await safe_edit(
+                context.bot, uid, message_id,
+                "❌ اتاق چندنفره توسط سازنده لغو شد.",
+                play_back_keyboard()
+            )
+
+
+async def join_game(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
+    games = get_games(context)
+    user_game = get_user_game(context)
+    game = games.get(gid)
+
+    if not game or game["status"] != "waiting":
+        await context.bot.send_message(
+            user.id,
+            "<b>😕 این بازی دیگه معتبر نیست.</b>\n\nلینک منقضی شده یا بازی قبلاً شروع شده.",
+            reply_markup=back_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if user.id in game["players"]:
+        await context.bot.send_message(
+            user.id,
+            "😅 نمی‌تونی با خودت بازی کنی! لینک رو برای دوستت بفرست.",
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    if user_has_active_competitive_game(context, user.id):
+        await context.bot.send_message(
+            user.id,
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            reply_markup=back_keyboard(),
+        )
+        return
+
+    host = game["players"][0]
+    game["players"].append(user.id)
+    game["names"][user.id] = user.first_name
+    game["scores"][user.id] = 0
+    game["status"] = "playing"
+    user_game[user.id] = gid
+
+    msg = await context.bot.send_message(
+        user.id,
+        friend_round_text(game, user.id),
+        reply_markup=friend_game_keyboard(gid),
+        parse_mode=ParseMode.HTML,
+    )
+    game["msgs"][user.id] = msg.message_id
+
+    await safe_edit(
+        context.bot, host, game["msgs"][host],
+        friend_round_text(game, host, note="✅ حریفت وصل شد!\n\n"),
+        friend_game_keyboard(gid),
+    )
+
 
 # ---------------- HANDLERS: GENERAL ----------------
 
@@ -682,6 +1545,9 @@ def require_membership(handler):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
 
+    if args and args[0].startswith("mjoin_"):
+        await join_multi_room(context, update.effective_user, args[0][6:])
+        return
     if args and args[0].startswith("join_"):
         await join_game(context, update.effective_user, args[0][5:])
         return
@@ -700,6 +1566,14 @@ async def check_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if await is_member(context.bot, query.from_user.id):
         pending = context.user_data.pop("pending_args", None)
         await query.answer("✅ عضویت شما تأیید شد!")
+
+        if pending and pending[0].startswith("mjoin_"):
+            await query.edit_message_text(
+                "عضویت تأیید شد؛ در حال ورود به اتاق...",
+                parse_mode=ParseMode.HTML
+            )
+            await join_multi_room(context, query.from_user, pending[0][6:])
+            return
 
         if pending and pending[0].startswith("join_"):
             await query.edit_message_text(
@@ -826,31 +1700,52 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def play_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    await query.edit_message_text(
+        "<b>🤖 انتخاب درجه سختی</b>\n\nسطح موردنظرت رو انتخاب کن:",
+        reply_markup=bot_difficulty_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
 
-    # هر بار که وارد بازی با ربات میشی، یه بازی جدید شروع میشه
-    context.user_data["bot_match"] = new_bot_match()
 
+@require_membership
+async def set_bot_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    difficulty = query.data.split(":")[1]
+    if difficulty not in {"easy", "medium", "hard"}:
+        await query.answer("درجه سختی نامعتبر است.", show_alert=True)
+        return
+    await query.answer()
+    context.user_data["bot_difficulty"] = difficulty
+    context.user_data["bot_match"] = new_bot_match(difficulty)
     await query.edit_message_text(
         play_text(context),
         reply_markup=game_keyboard(),
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
     )
 
 
 @require_membership
 async def rps_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-
     user_choice = query.data.split(":")[1]
-    bot_choice = random.choice(list(CHOICES))
+    if user_choice not in CHOICES:
+        await query.answer("انتخاب نامعتبر است.", show_alert=True)
+        return
+    await query.answer()
 
     match = get_bot_match(context)
 
-    # اگه بازی قبلی تموم شده بود، از اول شروع کن
+    # اگه بازی قبلی تموم شده بود، قبل از انتخاب حرکت ربات از اول شروع کن
     if match["user"] >= WIN_SCORE or match["bot"] >= WIN_SCORE:
-        match = new_bot_match()
+        match = new_bot_match(context.user_data.get("bot_difficulty", "easy"))
         context.user_data["bot_match"] = match
+
+    bot_choice = choose_bot_move(
+        match.get("difficulty", "easy"),
+        match.get("history", []),
+        beats=BEATS,
+    )
+    match.setdefault("history", []).append(user_choice)
 
     if user_choice == bot_choice:
         match["draw"] += 1
@@ -911,14 +1806,17 @@ async def rps_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @require_membership
 async def play_friend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     user = query.from_user
 
-    user_game = get_user_game(context)
-    old = user_game.get(user.id)
-    if old:
-        await end_game(context, old)
+    if user_has_active_competitive_game(context, user.id):
+        await query.answer(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            show_alert=True,
+        )
+        return
 
+    await query.answer()
+    user_game = get_user_game(context)
     gid = secrets.token_hex(4)
     get_games(context)[gid] = {
         "players": [user.id],
@@ -1020,12 +1918,17 @@ async def friend_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     gid = query.data.split(":")[1]
     await query.answer()
 
-    if gid not in get_games(context):
+    game = get_games(context).get(gid)
+    if not game:
         await query.edit_message_text(
             "<b>این بازی قبلاً تموم شده.</b>",
             reply_markup=play_back_keyboard(),
             parse_mode=ParseMode.HTML
         )
+        return
+
+    if query.from_user.id not in game["players"]:
+        await query.answer("شما عضو این بازی نیستید.", show_alert=True)
         return
 
     await end_game(context, gid)
@@ -1061,6 +1964,7 @@ def main():
 
     # general
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("groupgame", group_game_create))
     app.add_handler(CallbackQueryHandler(check_join, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(about, pattern="^about$"))
     app.add_handler(CallbackQueryHandler(menu, pattern="^menu$"))
@@ -1076,11 +1980,21 @@ def main():
 
     # game
     app.add_handler(CallbackQueryHandler(play, pattern="^play$"))
+    app.add_handler(CallbackQueryHandler(group_two_join, pattern="^g2_join:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(group_two_choice, pattern="^g2_choice:[0-9a-f]{8}:[0-9a-f]{16}:(rock|paper|scissors)$"))
+    app.add_handler(CallbackQueryHandler(group_two_end, pattern="^g2_end:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(play_bot, pattern="^play_bot$"))
+    app.add_handler(CallbackQueryHandler(set_bot_difficulty, pattern="^bot_difficulty:(easy|medium|hard)$"))
     app.add_handler(
         CallbackQueryHandler(rps_choice, pattern="^rps:(rock|paper|scissors)$")
     )
     app.add_handler(CallbackQueryHandler(play_friend, pattern="^play_friend$"))
+    app.add_handler(CallbackQueryHandler(play_multi, pattern="^play_multi$"))
+    app.add_handler(CallbackQueryHandler(multi_create, pattern="^multi_cap:(3|[4-9]|1[0-9]|20)$"))
+    app.add_handler(CallbackQueryHandler(multi_start, pattern="^multi_start:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(multi_choice, pattern="^multi_choice:[0-9a-f]{8}:[0-9a-f]{16}:(rock|paper|scissors)$"))
+    app.add_handler(CallbackQueryHandler(multi_cancel, pattern="^multi_cancel:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(multi_leave, pattern="^multi_leave:[0-9a-f]{8}$"))
     app.add_handler(
         CallbackQueryHandler(friend_choice, pattern="^fr:[0-9a-f]{8}:(rock|paper|scissors)$")
     )
