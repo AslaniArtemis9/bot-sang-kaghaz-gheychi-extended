@@ -902,6 +902,47 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
 
 
 
+# ---------------- DECORATOR ----------------
+
+def require_membership(handler):
+    @wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+
+        if user and await is_member(context.bot, user.id):
+            return await handler(update, context)
+
+        # کاربر عضو نیست؛ اگه با لینک دعوت اومده، ذخیره‌اش کن
+        if update.message:
+            if context.args:
+                context.user_data["pending_args"] = list(context.args)
+            else:
+                context.user_data.pop("pending_args", None)
+
+        query = update.callback_query
+        if query:
+            await query.answer(
+                "🔒 برای استفاده از ربات باید عضو کانال باشی!",
+                show_alert=True
+            )
+            chat = update.effective_chat
+            # Never replace a shared group-game message with a private
+            # membership prompt when a non-member presses its buttons.
+            if not chat or chat.type not in ("group", "supergroup"):
+                await query.edit_message_text(
+                    JOIN_TEXT,
+                    reply_markup=join_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
+        elif update.message:
+            await update.message.reply_text(
+                JOIN_TEXT,
+                reply_markup=join_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+
+    return wrapper
+
 # ---------------- GROUP TWO-PLAYER MODE ----------------
 
 def get_group_two_games(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -1241,47 +1282,6 @@ async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     for pid in game["players"]:
         get_group_two_user_game(context).pop(pid, None)
 
-
-# ---------------- DECORATOR ----------------
-
-def require_membership(handler):
-    @wraps(handler)
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-
-        if user and await is_member(context.bot, user.id):
-            return await handler(update, context)
-
-        # کاربر عضو نیست؛ اگه با لینک دعوت اومده، ذخیره‌اش کن
-        if update.message:
-            if context.args:
-                context.user_data["pending_args"] = list(context.args)
-            else:
-                context.user_data.pop("pending_args", None)
-
-        query = update.callback_query
-        if query:
-            await query.answer(
-                "🔒 برای استفاده از ربات باید عضو کانال باشی!",
-                show_alert=True
-            )
-            chat = update.effective_chat
-            # Never replace a shared group-game message with a private
-            # membership prompt when a non-member presses its buttons.
-            if not chat or chat.type not in ("group", "supergroup"):
-                await query.edit_message_text(
-                    JOIN_TEXT,
-                    reply_markup=join_keyboard(),
-                    parse_mode=ParseMode.HTML
-                )
-        elif update.message:
-            await update.message.reply_text(
-                JOIN_TEXT,
-                reply_markup=join_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
-
-    return wrapper
 
 @require_membership
 async def play_multi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
