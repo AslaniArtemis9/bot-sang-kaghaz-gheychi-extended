@@ -1263,8 +1263,13 @@ async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("فقط بازیکنان مسابقه می‌توانند آن را پایان دهند.", show_alert=True)
         return
 
+    # Close the state before yielding so a round timeout cannot resolve
+    # concurrently with a player's request to end the match.
+    was_playing = game["status"] == "playing"
+    game["status"] = "finished"
+    game["round_token"] = None
     await query.answer("مسابقه پایان یافت.")
-    if game["status"] == "playing" and len(game["players"]) == 2:
+    if was_playing and len(game["players"]) == 2:
         other = next(pid for pid in game["players"] if pid != uid)
         game["final_text"] = (
             "<b>🏁 مسابقه با انصراف پایان یافت.</b>\\n\\n"
@@ -1275,8 +1280,6 @@ async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         game["final_text"] = "<b>❌ مسابقه توسط سازنده لغو شد.</b>"
 
-    game["status"] = "finished"
-    game["round_token"] = None
     await refresh_group_two_game(context, chat.id)
     get_group_two_games(context).pop(chat.id, None)
     for pid in game["players"]:
