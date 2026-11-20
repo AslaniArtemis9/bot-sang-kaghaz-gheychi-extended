@@ -623,16 +623,10 @@ def multi_room_text(room: dict) -> str:
         f"{i}. {esc(room['names'].get(uid, 'بازیکن'))}"
         for i, uid in enumerate(room["players"], 1)
     )
-    if room["status"] == "playing":
-        status_text = (
-            "🔒 <b>مسابقه شروع شد و اتاق قفل شده است.</b>\n"
-            "مرحلهٔ انتخاب حرکت در گام بعدی اضافه می‌شود."
-        )
-    else:
-        status_text = (
-            "⏳ اتاق در انتظار ورود بازیکنان است.\n"
-            "پس از حضور حداقل ۳ نفر، سازنده می‌تواند مسابقه را شروع کند."
-        )
+    status_text = (
+        "⏳ اتاق در انتظار ورود بازیکنان است.\n"
+        "پس از حضور حداقل ۳ نفر، سازنده می‌تواند مسابقه را شروع کند."
+    )
     return (
         "<b>🌐 اتاق بازی چندنفره</b>\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -642,9 +636,33 @@ def multi_room_text(room: dict) -> str:
     )
 
 
+def multi_game_text(room: dict, uid: int, note: str = "") -> str:
+    scores = "\n".join(
+        f"{esc(room['names'].get(pid, 'بازیکن'))}: {room['scores'][pid]} امتیاز"
+        for pid in room["players"]
+    )
+    chosen = len(room["choices"])
+    total = len(room["players"])
+    if uid in room["choices"]:
+        choice_text = "✅ انتخابت ثبت شده؛ منتظر بقیه بازیکنان باش."
+    else:
+        choice_text = "👇 حرکت این دور را انتخاب کن."
+    return (
+        "<b>🌐 مسابقهٔ چندنفره</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎲 دور {room['round']}\n"
+        f"📊 انتخاب‌ها ثبت‌شده: {chosen} از {total}\n\n"
+        f"{scores}\n\n"
+        f"{note}{choice_text}"
+    )
+
+
 def multi_player_keyboard(gid: str):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚪 خروج از اتاق", callback_data=f"multi_leave:{gid}")]
+        [
+            InlineKeyboardButton(f"{emoji} {name}", callback_data=f"multi_choice:{gid}:{key}")
+            for key, (emoji, name) in CHOICES.items()
+        ]
     ])
 
 
@@ -652,19 +670,102 @@ async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> No
     room = get_multi_rooms(context).get(gid)
     if not room:
         return
-    text = multi_room_text(room)
     for uid in list(room["players"]):
         message_id = room["messages"].get(uid)
         if not message_id:
             continue
         if room["status"] == "waiting":
+            text = multi_room_text(room)
             keyboard = (
                 multi_room_keyboard(gid, room["link"])
                 if uid == room["host"] else multi_player_keyboard(gid)
             )
+        elif room["status"] == "playing":
+            text = multi_game_text(room, uid)
+            keyboard = (
+                multi_player_keyboard(gid)
+                if uid not in room["choices"] else None
+            )
         else:
+            text = room["final_texts"].get(uid, "<b>🏁 مسابقه تمام شد.</b>")
             keyboard = None
         await safe_edit(context.bot, uid, message_id, text, keyboard)
+
+
+async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room or room["status"] != "playing":
+        return
+
+    players = list(room["players"])
+    choices = dict(room["choices"])
+    if len(choices) != len(players):
+        return
+
+    used = set(choices.values())
+    winners = set()
+    if len(used) == 2:
+        first, second = tuple(used)
+        if BEATS[first] == second:
+            winning_choice = first
+        elif BEATS[second] == first:
+            winning_choice = second
+        else:
+            winning_choice = None
+        if winning_choice:
+            winners = {uid for uid, choice in choices.items() if choice == winning_choice}
+
+    if winners:
+        for uid in winners:
+            room["scores"][uid] += 1
+        result_note = (
+            "🏆 برندهٔ این دور: "
+            + "، ".join(esc(room["names"].get(uid, "بازیکن")) for uid in winners)
+            + "\n\n"
+        )
+    else:
+        room["draws"] += 1
+        result_note = "🤝 این دور مساوی شد؛ امتیازی داده نشد.\n\n"
+
+    room["last_choices"] = choices
+    room["round"] += 1
+    room["choices"] = {}
+
+    champions = [uid for uid in players if room["scores"][uid] >= WIN_SCORE]
+    if champions:
+        room["status"] = "finished"
+        champion_names = "، ".join(
+            esc(room["names"].get(uid, "بازیکن")) for uid in champions
+        )
+        room["final_texts"] = {}
+        for uid in players:
+            won = uid in champions
+            room["final_texts"][uid] = (
+                "<b>🏁 مسابقه تمام شد!</b>\n\n"
+                f"🏆 برنده: {champion_names}\n\n"
+                f"امتیاز تو: {room['scores'][uid']} از {WIN_SCORE}"
+                if won else
+                "<b>🏁 مسابقه تمام شد!</b>\n\n"
+                f"🏆 برنده: {champion_names}\n\n"
+                f"امتیاز تو: {room['scores'][uid']} از {WIN_SCORE}"
+            )
+            record_result(
+                uid,
+                room["names"].get(uid, "بازیکن"),
+                won=won,
+            )
+        await refresh_multi_room(context, gid)
+        return
+
+    room["round_note"] = result_note
+    for uid in players:
+        message_id = room["messages"].get(uid)
+        if message_id:
+            await safe_edit(
+                context.bot, uid, message_id,
+                multi_game_text(room, uid, note=result_note),
+                multi_player_keyboard(gid),
+            )
 
 
 async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
@@ -759,8 +860,43 @@ async def multi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     room["status"] = "playing"
+    room["scores"] = {uid: 0 for uid in room["players"]}
+    room["choices"] = {}
+    room["draws"] = 0
+    room["round"] = 1
+    room["last_choices"] = {}
+    room["final_texts"] = {}
+    room["round_note"] = ""
     await query.answer("مسابقه شروع شد!")
     await refresh_multi_room(context, gid)
+
+
+@require_membership
+async def multi_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, gid, choice = query.data.split(":")
+    room = get_multi_rooms(context).get(gid)
+    uid = query.from_user.id
+
+    if not room or room["status"] != "playing":
+        await query.answer("این مسابقه فعال نیست.", show_alert=True)
+        return
+    if uid not in room["players"]:
+        await query.answer("شما عضو این مسابقه نیستید.", show_alert=True)
+        return
+    if choice not in CHOICES:
+        await query.answer("انتخاب نامعتبر است.", show_alert=True)
+        return
+    if uid in room["choices"]:
+        await query.answer("انتخاب این دورت قبلاً ثبت شده است.")
+        return
+
+    room["choices"][uid] = choice
+    await query.answer("انتخابت ثبت شد.")
+    if len(room["choices"]) == len(room["players"]):
+        await resolve_multi_round(context, gid)
+    else:
+        await refresh_multi_room(context, gid)
 
 
 @require_membership
@@ -1322,6 +1458,7 @@ def main():
     app.add_handler(CallbackQueryHandler(play_multi, pattern="^play_multi$"))
     app.add_handler(CallbackQueryHandler(multi_create, pattern="^multi_cap:(3|[4-9]|1[0-9]|20)$"))
     app.add_handler(CallbackQueryHandler(multi_start, pattern="^multi_start:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(multi_choice, pattern="^multi_choice:[0-9a-f]{8}:(rock|paper|scissors)$"))
     app.add_handler(CallbackQueryHandler(multi_cancel, pattern="^multi_cancel:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(multi_leave, pattern="^multi_leave:[0-9a-f]{8}$"))
     app.add_handler(
