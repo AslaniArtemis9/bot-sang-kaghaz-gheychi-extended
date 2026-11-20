@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram.error import NetworkError
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / "1.py"
 SPEC = importlib.util.spec_from_file_location("rps_bot_group_two", MODULE_PATH)
 bot = importlib.util.module_from_spec(SPEC)
@@ -200,6 +202,90 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["round"], 1)
         self.assertEqual(game["scores"], {1: 0, 2: 0})
         edit.assert_not_awaited()
+
+    async def test_join_state_refreshes_when_callback_ack_fails(self):
+        game = {
+            "gid": "deadbeef",
+            "chat_id": -100123,
+            "message_id": 55,
+            "host": 1,
+            "players": [1],
+            "names": {1: "A"},
+            "scores": {1: 0},
+            "choices": {},
+            "draws": 0,
+            "round": 1,
+            "round_token": None,
+            "round_note": "",
+            "status": "waiting",
+        }
+        context = SimpleNamespace(
+            bot_data={
+                "group_two_games": {-100123: game},
+                "group_two_user_game": {1: -100123},
+            },
+            bot=SimpleNamespace(),
+            application=SimpleNamespace(create_task=lambda *args, **kwargs: None),
+        )
+        query = SimpleNamespace(
+            data="g2_join:deadbeef",
+            from_user=SimpleNamespace(id=2, first_name="B"),
+            answer=AsyncMock(side_effect=NetworkError("callback acknowledgement failed")),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=query.from_user,
+            effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
+        )
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
+             patch.object(bot, "schedule_group_two_timeout"), \\
+             patch.object(bot, "refresh_group_two_game", new=AsyncMock()) as refresh:
+            await bot.group_two_join(update, context)
+        self.assertEqual(game["players"], [1, 2])
+        self.assertEqual(game["status"], "playing")
+        refresh.assert_awaited_once_with(context, -100123)
+
+    async def test_choice_resolves_when_callback_ack_fails(self):
+        game = self.make_game({1: "rock"})
+        context = self.make_context(game)
+        query = SimpleNamespace(
+            data="g2_choice:deadbeef:abcdef0123456789:scissors",
+            from_user=SimpleNamespace(id=2),
+            answer=AsyncMock(side_effect=NetworkError("callback acknowledgement failed")),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=query.from_user,
+            effective_chat=SimpleNamespace(id=-100123, type="group"),
+        )
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
+             patch.object(bot, "safe_edit", new=AsyncMock()), \\
+             patch.object(bot, "schedule_group_two_timeout"):
+            await bot.group_two_choice(update, context)
+        self.assertEqual(game["scores"], {1: 1, 2: 0})
+        self.assertEqual(game["round"], 2)
+        self.assertEqual(game["choices"], {})
+
+    async def test_end_cleans_up_when_callback_ack_fails(self):
+        game = self.make_game()
+        context = self.make_context(game)
+        query = SimpleNamespace(
+            data="g2_end:deadbeef",
+            from_user=SimpleNamespace(id=1),
+            answer=AsyncMock(side_effect=NetworkError("callback acknowledgement failed")),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=query.from_user,
+            effective_chat=SimpleNamespace(id=-100123, type="group"),
+        )
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
+             patch.object(bot, "safe_edit", new=AsyncMock()), \\
+             patch.object(bot, "record_result") as record:
+            await bot.group_two_end(update, context)
+        self.assertNotIn(-100123, context.bot_data["group_two_games"])
+        self.assertEqual(context.bot_data["group_two_user_game"], {})
+        self.assertEqual(record.call_count, 2)
 
     async def test_non_member_callback_does_not_replace_group_message(self):
         game = self.make_game()
