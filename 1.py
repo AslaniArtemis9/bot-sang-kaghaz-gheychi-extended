@@ -667,10 +667,10 @@ def multi_waiting_player_keyboard(gid: str):
     ])
 
 
-def multi_player_keyboard(gid: str):
+def multi_player_keyboard(gid: str, round_token: str):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(f"{emoji} {name}", callback_data=f"multi_choice:{gid}:{key}")
+            InlineKeyboardButton(f"{emoji} {name}", callback_data=f"multi_choice:{gid}:{round_token}:{key}")
             for key, (emoji, name) in CHOICES.items()
         ]
     ])
@@ -693,7 +693,7 @@ async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> No
         elif room["status"] == "playing":
             text = multi_game_text(room, uid)
             keyboard = (
-                multi_player_keyboard(gid)
+                multi_player_keyboard(gid, room["round_token"])
                 if uid not in room["choices"] else None
             )
         else:
@@ -734,7 +734,7 @@ async def resolve_multi_round(
     context: ContextTypes.DEFAULT_TYPE,
     gid: str,
     timed_out: bool = False,
-    expected_token: str | None = None,
+    expected_token=None,
 ) -> None:
     room = get_multi_rooms(context).get(gid)
     if not room or room["status"] != "playing":
@@ -833,7 +833,7 @@ async def resolve_multi_round(
             await safe_edit(
                 context.bot, uid, message_id,
                 multi_game_text(room, uid, note=result_note),
-                multi_player_keyboard(gid) if uid not in room["choices"] else None,
+                multi_player_keyboard(gid, room["round_token"]) if uid not in room["choices"] else None,
             )
 
 async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
@@ -944,12 +944,15 @@ async def multi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 @require_membership
 async def multi_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    _, gid, choice = query.data.split(":")
+    _, gid, round_token, choice = query.data.split(":")
     room = get_multi_rooms(context).get(gid)
     uid = query.from_user.id
 
     if not room or room["status"] != "playing":
         await query.answer("این مسابقه فعال نیست.", show_alert=True)
+        return
+    if room.get("round_token") != round_token:
+        await query.answer("مهلت یا دور این انتخاب تمام شده است؛ از دکمه‌های دور جدید استفاده کن.", show_alert=True)
         return
     if uid not in room["players"]:
         await query.answer("شما عضو این مسابقه نیستید.", show_alert=True)
@@ -1528,7 +1531,7 @@ def main():
     app.add_handler(CallbackQueryHandler(play_multi, pattern="^play_multi$"))
     app.add_handler(CallbackQueryHandler(multi_create, pattern="^multi_cap:(3|[4-9]|1[0-9]|20)$"))
     app.add_handler(CallbackQueryHandler(multi_start, pattern="^multi_start:[0-9a-f]{8}$"))
-    app.add_handler(CallbackQueryHandler(multi_choice, pattern="^multi_choice:[0-9a-f]{8}:(rock|paper|scissors)$"))
+    app.add_handler(CallbackQueryHandler(multi_choice, pattern="^multi_choice:[0-9a-f]{8}:[0-9a-f]{16}:(rock|paper|scissors)$"))
     app.add_handler(CallbackQueryHandler(multi_cancel, pattern="^multi_cancel:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(multi_leave, pattern="^multi_leave:[0-9a-f]{8}$"))
     app.add_handler(
