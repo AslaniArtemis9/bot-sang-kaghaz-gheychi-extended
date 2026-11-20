@@ -938,7 +938,7 @@ def group_two_text(game: dict, note: str = "") -> str:
             f"{note}"
             "انتخاب‌ها تا پایان دور مخفی می‌مانند. حرکتت را انتخاب کن 👇"
         )
-    return game.get("final_text", "<b>🏁 مسابقه تمام شد.</b>")
+    return (game.get("final_text", "<b>🏁 مسابقه تمام شد.</b>") + "\\n\\n" + game.get("round_note", ""))
 
 
 def group_two_keyboard(gid: str, game: dict):
@@ -1265,11 +1265,15 @@ def require_membership(handler):
                 "🔒 برای استفاده از ربات باید عضو کانال باشی!",
                 show_alert=True
             )
-            await query.edit_message_text(
-                JOIN_TEXT,
-                reply_markup=join_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
+            chat = update.effective_chat
+            # Never replace a shared group-game message with a private
+            # membership prompt when a non-member presses its buttons.
+            if not chat or chat.type not in ("group", "supergroup"):
+                await query.edit_message_text(
+                    JOIN_TEXT,
+                    reply_markup=join_keyboard(),
+                    parse_mode=ParseMode.HTML
+                )
         elif update.message:
             await update.message.reply_text(
                 JOIN_TEXT,
@@ -1920,6 +1924,7 @@ def main():
 
     # general
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("groupgame", group_game_create))
     app.add_handler(CallbackQueryHandler(check_join, pattern="^check_join$"))
     app.add_handler(CallbackQueryHandler(about, pattern="^about$"))
     app.add_handler(CallbackQueryHandler(menu, pattern="^menu$"))
@@ -1935,6 +1940,9 @@ def main():
 
     # game
     app.add_handler(CallbackQueryHandler(play, pattern="^play$"))
+    app.add_handler(CallbackQueryHandler(group_two_join, pattern="^g2_join:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(group_two_choice, pattern="^g2_choice:[0-9a-f]{8}:[0-9a-f]{16}:(rock|paper|scissors)$"))
+    app.add_handler(CallbackQueryHandler(group_two_end, pattern="^g2_end:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(play_bot, pattern="^play_bot$"))
     app.add_handler(CallbackQueryHandler(set_bot_difficulty, pattern="^bot_difficulty:(easy|medium|hard)$"))
     app.add_handler(
