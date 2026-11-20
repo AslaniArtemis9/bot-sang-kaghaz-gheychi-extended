@@ -204,6 +204,7 @@ def multi_room_keyboard(gid: str, link: str):
         quote_via=quote,
     )
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ شروع مسابقه", callback_data=f"multi_start:{gid}")],
         [InlineKeyboardButton("📤 ارسال لینک دعوت", url=share_url)],
         [InlineKeyboardButton("❌ لغو اتاق", callback_data=f"multi_cancel:{gid}")],
     ])
@@ -622,13 +623,22 @@ def multi_room_text(room: dict) -> str:
         f"{i}. {esc(room['names'].get(uid, 'بازیکن'))}"
         for i, uid in enumerate(room["players"], 1)
     )
+    if room["status"] == "playing":
+        status_text = (
+            "🔒 <b>مسابقه شروع شد و اتاق قفل شده است.</b>\n"
+            "مرحلهٔ انتخاب حرکت در گام بعدی اضافه می‌شود."
+        )
+    else:
+        status_text = (
+            "⏳ اتاق در انتظار ورود بازیکنان است.\n"
+            "پس از حضور حداقل ۳ نفر، سازنده می‌تواند مسابقه را شروع کند."
+        )
     return (
         "<b>🌐 اتاق بازی چندنفره</b>\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 بازیکنان: {len(room['players'])} از {room['capacity']}\n\n"
         f"{names}\n\n"
-        "⏳ اتاق در انتظار ورود بازیکنان است.\n"
-        "شروع مسابقه در مرحلهٔ بعدی فعال می‌شود."
+        f"{status_text}"
     )
 
 
@@ -647,10 +657,13 @@ async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> No
         message_id = room["messages"].get(uid)
         if not message_id:
             continue
-        keyboard = (
-            multi_room_keyboard(gid, room["link"])
-            if uid == room["host"] else multi_player_keyboard(gid)
-        )
+        if room["status"] == "waiting":
+            keyboard = (
+                multi_room_keyboard(gid, room["link"])
+                if uid == room["host"] else multi_player_keyboard(gid)
+            )
+        else:
+            keyboard = None
         await safe_edit(context.bot, uid, message_id, text, keyboard)
 
 
@@ -727,6 +740,30 @@ async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 @require_membership
+async def multi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gid = query.data.split(":")[1]
+    room = get_multi_rooms(context).get(gid)
+
+    if not room or room["status"] != "waiting":
+        await query.answer("این اتاق دیگر در وضعیت انتظار نیست.", show_alert=True)
+        return
+    if query.from_user.id != room["host"]:
+        await query.answer("فقط سازندهٔ اتاق می‌تواند مسابقه را شروع کند.", show_alert=True)
+        return
+    if len(room["players"]) < 3:
+        await query.answer(
+            f"برای شروع حداقل ۳ نفر لازم است؛ اکنون {len(room['players'])} نفر حضور دارند.",
+            show_alert=True,
+        )
+        return
+
+    room["status"] = "playing"
+    await query.answer("مسابقه شروع شد!")
+    await refresh_multi_room(context, gid)
+
+
+@require_membership
 async def multi_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     gid = query.data.split(":")[1]
@@ -763,6 +800,9 @@ async def multi_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if query.from_user.id != room["host"]:
         await query.answer("فقط سازندهٔ اتاق می‌تواند آن را لغو کند.", show_alert=True)
+        return
+    if room["status"] != "waiting":
+        await query.answer("مسابقه شروع شده و دیگر قابل لغو از این بخش نیست.", show_alert=True)
         return
     get_multi_rooms(context).pop(gid, None)
     await query.answer("اتاق لغو شد.")
@@ -1281,6 +1321,7 @@ def main():
     app.add_handler(CallbackQueryHandler(play_friend, pattern="^play_friend$"))
     app.add_handler(CallbackQueryHandler(play_multi, pattern="^play_multi$"))
     app.add_handler(CallbackQueryHandler(multi_create, pattern="^multi_cap:(3|[4-9]|1[0-9]|20)$"))
+    app.add_handler(CallbackQueryHandler(multi_start, pattern="^multi_start:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(multi_cancel, pattern="^multi_cancel:[0-9a-f]{8}$"))
     app.add_handler(CallbackQueryHandler(multi_leave, pattern="^multi_leave:[0-9a-f]{8}$"))
     app.add_handler(
