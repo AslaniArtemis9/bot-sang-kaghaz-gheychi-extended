@@ -62,15 +62,16 @@ class TelegramResilienceTests(unittest.IsolatedAsyncioTestCase):
     async def test_room_refresh_continues_after_individual_message_edit_errors(self):
         room = make_room()
         room["round_token"] = "0123456789abcdef"
-        context = SimpleNamespace(bot_data={"multi_rooms": {"deadbeef": room}}, bot=object())
+        bot_api = SimpleNamespace(
+            edit_message_text=AsyncMock(
+                side_effect=[NetworkError("temporary outage"), None, None]
+            )
+        )
+        context = SimpleNamespace(bot_data={"multi_rooms": {"deadbeef": room}}, bot=bot_api)
 
-        with patch.object(
-            bot, "safe_edit",
-            new=AsyncMock(side_effect=[NetworkError("temporary outage"), None, None]),
-        ) as edit:
-            await bot.refresh_multi_room(context, "deadbeef")
+        await bot.refresh_multi_room(context, "deadbeef")
 
-        self.assertEqual(edit.await_count, 3)
+        self.assertEqual(bot_api.edit_message_text.await_count, 3)
         self.assertEqual(room["status"], "playing")
 
     async def test_simultaneous_choices_resolve_once_even_if_one_ack_fails(self):
