@@ -24,7 +24,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
             "choices": choices or {},
             "draws": 0,
             "round": 1,
-            "round_token": "round-token-123456",
+            "round_token": "abcdef0123456789",
             "round_note": "",
             "status": "playing",
         }
@@ -98,7 +98,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
         game = self.make_game()
         context = self.make_context(game)
         query = SimpleNamespace(
-            data="g2_choice:deadbeef:round-token-123456:rock",
+            data="g2_choice:deadbeef:abcdef0123456789:rock",
             from_user=SimpleNamespace(id=99),
             answer=AsyncMock(),
         )
@@ -116,7 +116,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
         game = self.make_game({1: "rock"})
         context = self.make_context(game)
         query = SimpleNamespace(
-            data="g2_choice:deadbeef:round-token-123456:paper",
+            data="g2_choice:deadbeef:abcdef0123456789:paper",
             from_user=SimpleNamespace(id=1),
             answer=AsyncMock(),
         )
@@ -136,11 +136,11 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot, "safe_edit", new=AsyncMock()), \
              patch.object(bot, "schedule_group_two_timeout") as schedule:
             await bot.resolve_group_two_round(
-                context, -100123, expected_token="round-token-123456"
+                context, -100123, expected_token="abcdef0123456789"
             )
             await bot.resolve_group_two_round(
                 context, -100123, timed_out=True,
-                expected_token="round-token-123456"
+                expected_token="abcdef0123456789"
             )
         self.assertEqual(game["scores"], {1: 1, 2: 0})
         self.assertEqual(game["round"], 2)
@@ -154,7 +154,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
              patch.object(bot, "schedule_group_two_timeout"):
             await bot.resolve_group_two_round(
                 context, -100123, timed_out=True,
-                expected_token="round-token-123456"
+                expected_token="abcdef0123456789"
             )
         self.assertEqual(game["scores"], {1: 0, 2: 1})
         self.assertIn("انتخاب نکرد", game["round_note"])
@@ -166,7 +166,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
              patch.object(bot, "record_result") as record:
             await bot.resolve_group_two_round(
                 context, -100123, timed_out=True,
-                expected_token="round-token-123456"
+                expected_token="abcdef0123456789"
             )
         self.assertNotIn(-100123, context.bot_data["group_two_games"])
         self.assertEqual(context.bot_data["group_two_user_game"], {})
@@ -181,7 +181,7 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot, "safe_edit", new=AsyncMock()), \
              patch.object(bot, "record_result") as record:
             await bot.resolve_group_two_round(
-                context, -100123, expected_token="round-token-123456"
+                context, -100123, expected_token="abcdef0123456789"
             )
         self.assertNotIn(-100123, context.bot_data["group_two_games"])
         self.assertEqual(record.call_count, 2)
@@ -190,12 +190,12 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_timeout_cannot_resolve_new_round(self):
         game = self.make_game({1: "rock"})
-        game["round_token"] = "new-round-token-123"
+        game["round_token"] = "0123456789abcdef"
         context = self.make_context(game)
         with patch.object(bot, "safe_edit", new=AsyncMock()) as edit:
             await bot.resolve_group_two_round(
                 context, -100123, timed_out=True,
-                expected_token="round-token-123456"
+                expected_token="abcdef0123456789"
             )
         self.assertEqual(game["round"], 1)
         self.assertEqual(game["scores"], {1: 0, 2: 0})
