@@ -51,16 +51,17 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
             "choices": {},
             "msgs": {10: 100, 20: 200},
         }
-        context = SimpleNamespace(bot_data={"games": {"1234abcd": game}})
+        context = SimpleNamespace(bot_data={"games": {"1234abcd": game}}, bot=object())
         query = SimpleNamespace(
             data="fr_end:1234abcd",
             from_user=SimpleNamespace(id=99),
             answer=AsyncMock(),
             edit_message_text=AsyncMock(),
         )
-        update = SimpleNamespace(callback_query=query)
+        update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
 
-        await bot.friend_end(update, context)
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)):
+            await bot.friend_end(update, context)
 
         self.assertIn("1234abcd", context.bot_data["games"])
         query.answer.assert_awaited_once_with(
@@ -78,16 +79,17 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
             "choices": {},
             "msgs": {10: 100, 20: 200},
         }
-        context = SimpleNamespace(bot_data={"games": {"1234abcd": game}})
+        context = SimpleNamespace(bot_data={"games": {"1234abcd": game}}, bot=object())
         query = SimpleNamespace(
             data="fr_end:1234abcd",
             from_user=SimpleNamespace(id=10),
             answer=AsyncMock(),
             edit_message_text=AsyncMock(),
         )
-        update = SimpleNamespace(callback_query=query)
+        update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
 
-        with patch.object(bot, "end_game", new=AsyncMock()) as end_game:
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
+             patch.object(bot, "end_game", new=AsyncMock()) as end_game:
             await bot.friend_end(update, context)
 
         end_game.assert_awaited_once_with(context, "1234abcd")
