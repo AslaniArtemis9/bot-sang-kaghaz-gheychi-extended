@@ -657,6 +657,12 @@ def multi_game_text(room: dict, uid: int, note: str = "") -> str:
     )
 
 
+def multi_waiting_player_keyboard(gid: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚪 خروج از اتاق", callback_data=f"multi_leave:{gid}")]
+    ])
+
+
 def multi_player_keyboard(gid: str):
     return InlineKeyboardMarkup([
         [
@@ -678,7 +684,7 @@ async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> No
             text = multi_room_text(room)
             keyboard = (
                 multi_room_keyboard(gid, room["link"])
-                if uid == room["host"] else multi_player_keyboard(gid)
+                if uid == room["host"] else multi_waiting_player_keyboard(gid)
             )
         elif room["status"] == "playing":
             text = multi_game_text(room, uid)
@@ -740,14 +746,12 @@ async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> N
         room["final_texts"] = {}
         for uid in players:
             won = uid in champions
+            verdict = "🎉 تو برندهٔ مسابقه شدی!" if won else "این بار برنده نشدی."
             room["final_texts"][uid] = (
                 "<b>🏁 مسابقه تمام شد!</b>\n\n"
-                f"🏆 برنده: {champion_names}\n\n"
-                f"امتیاز تو: {room['scores'][uid']} از {WIN_SCORE}"
-                if won else
-                "<b>🏁 مسابقه تمام شد!</b>\n\n"
-                f"🏆 برنده: {champion_names}\n\n"
-                f"امتیاز تو: {room['scores'][uid']} از {WIN_SCORE}"
+                f"🏆 برنده: {champion_names}\n"
+                f"{verdict}\n\n"
+                f"امتیاز تو: {room['scores'][uid]} از {WIN_SCORE}"
             )
             record_result(
                 uid,
@@ -794,7 +798,7 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
     room["names"][user.id] = user.first_name or "بازیکن"
     msg = await context.bot.send_message(
         user.id, multi_room_text(room), parse_mode=ParseMode.HTML,
-        reply_markup=multi_player_keyboard(gid)
+        reply_markup=multi_waiting_player_keyboard(gid)
     )
     room["messages"][user.id] = msg.message_id
     await refresh_multi_room(context, gid)
