@@ -82,6 +82,27 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
         context.bot.send_message.assert_awaited_once()
         safe_edit.assert_not_awaited()
 
+    async def test_play_friend_rejects_conflicting_match_with_one_callback_answer(self):
+        context = self.make_context()
+        context.bot_data["multi_rooms"] = {
+            "active": {"players": [42], "status": "playing"}
+        }
+        query = SimpleNamespace(
+            from_user=SimpleNamespace(id=42, first_name="Guest"),
+            message=SimpleNamespace(message_id=77),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(callback_query=query)
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)):
+            await bot.play_friend(update, context)
+        query.answer.assert_awaited_once_with(
+            "شما از قبل در یک مسابقهٔ دیگر شرکت دارید؛ ابتدا آن را تمام کنید.",
+            show_alert=True,
+        )
+        query.edit_message_text.assert_not_awaited()
+        self.assertEqual(bot.get_games(context), {})
+
     async def test_nonparticipant_cannot_end_friend_game(self):
         game = {
             "players": [10, 20],
