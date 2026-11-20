@@ -651,7 +651,8 @@ def multi_game_text(room: dict, uid: int, note: str = "") -> str:
         "<b>🌐 مسابقهٔ چندنفره</b>\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"🎲 دور {room['round']}\n"
-        f"📊 انتخاب‌ها ثبت‌شده: {chosen} از {total}\n\n"
+        f"📊 انتخاب‌ها ثبت‌شده: {chosen} از {total}\n"
+        f"🤝 دورهای مساوی: {room['draws']}\n\n"
         f"{scores}\n\n"
         f"{note}{choice_text}"
     )
@@ -759,6 +760,7 @@ async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> N
                 won=won,
             )
         await refresh_multi_room(context, gid)
+        get_multi_rooms(context).pop(gid, None)
         return
 
     room["round_note"] = result_note
