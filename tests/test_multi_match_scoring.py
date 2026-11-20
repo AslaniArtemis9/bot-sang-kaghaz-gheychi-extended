@@ -55,7 +55,7 @@ class MultiMatchScoringTests(unittest.IsolatedAsyncioTestCase):
         room = self.make_room({1: "paper", 2: "paper", 3: "paper"})
         context = self.make_context(room)
 
-        with patch.object(bot, "schedule_multi_round"), \
+        with patch.object(bot, "schedule_multi_round_timeout"), \
              patch.object(bot, "safe_edit", new=AsyncMock()):
             await bot.resolve_multi_round(
                 context, "deadbeef", expected_token="round-token"
