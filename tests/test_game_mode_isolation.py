@@ -64,8 +64,14 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
             await bot.friend_end(update, context)
 
         self.assertIn("1234abcd", context.bot_data["games"])
-        query.answer.assert_awaited_once_with(
-            "شما عضو این بازی نیستید.", show_alert=True
+        self.assertEqual(query.answer.await_count, 2)
+        self.assertEqual(
+            query.answer.await_args_list[-1].args,
+            ("شما عضو این بازی نیستید.",),
+        )
+        self.assertEqual(
+            query.answer.await_args_list[-1].kwargs,
+            {"show_alert": True},
         )
 
     async def test_participant_can_end_friend_game(self):
