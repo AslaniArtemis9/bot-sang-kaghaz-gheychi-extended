@@ -897,6 +897,12 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
     if len(room["players"]) >= room["capacity"]:
         await context.bot.send_message(user.id, "ظرفیت این اتاق تکمیل شده است.")
         return
+    if any(user.id in other["players"] for other in rooms.values()):
+        await context.bot.send_message(
+            user.id, "ابتدا از اتاق چندنفرهٔ فعلی خود خارج شوید.",
+            reply_markup=back_keyboard()
+        )
+        return
     if user_has_active_competitive_game(context, user.id):
         await context.bot.send_message(
             user.id,
