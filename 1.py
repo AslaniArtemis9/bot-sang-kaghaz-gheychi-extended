@@ -1206,7 +1206,10 @@ async def group_two_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     get_group_two_user_game(context)[uid] = chat.id
     game["status"] = "playing"
     schedule_group_two_timeout(context, chat.id)
-    await query.answer("وارد مسابقه شدی؛ بازی شروع شد!")
+    try:
+        await query.answer("وارد مسابقه شدی؛ بازی شروع شد!")
+    except TelegramError as e:
+        logger.warning("group join callback answer failed for %s: %s", uid, e)
     await refresh_group_two_game(context, chat.id)
 
 
@@ -1237,7 +1240,10 @@ async def group_two_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     game["choices"][uid] = choice
-    await query.answer("انتخابت مخفیانه ثبت شد.")
+    try:
+        await query.answer("انتخابت مخفیانه ثبت شد.")
+    except TelegramError as e:
+        logger.warning("group choice callback answer failed for %s: %s", uid, e)
     if len(game["choices"]) == 2:
         await resolve_group_two_round(
             context, chat.id, expected_token=token
@@ -1268,7 +1274,10 @@ async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     was_playing = game["status"] == "playing"
     game["status"] = "finished"
     game["round_token"] = None
-    await query.answer("مسابقه پایان یافت.")
+    try:
+        await query.answer("مسابقه پایان یافت.")
+    except TelegramError as e:
+        logger.warning("group end callback answer failed for %s: %s", uid, e)
     if was_playing and len(game["players"]) == 2:
         other = next(pid for pid in game["players"] if pid != uid)
         game["final_text"] = (
