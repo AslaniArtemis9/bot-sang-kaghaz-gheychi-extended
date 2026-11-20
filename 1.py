@@ -1019,7 +1019,11 @@ async def multi_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Record the choice before yielding to Telegram. The timeout may wake
     # immediately after this point, so the resolver is tied to this round token.
     room["choices"][uid] = choice
-    await query.answer("انتخابت ثبت شد.")
+    try:
+        await query.answer("انتخابت ثبت شد.")
+    except TelegramError as e:
+        # A failed callback acknowledgement must not discard an accepted move.
+        logger.warning("callback answer failed for %s: %s", uid, e)
     if len(room["choices"]) == len(room["players"]):
         await resolve_multi_round(context, gid, expected_token=round_token)
     else:
