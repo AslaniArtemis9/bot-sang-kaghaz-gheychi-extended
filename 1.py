@@ -1595,6 +1595,7 @@ def main():
     # game
     app.add_handler(CallbackQueryHandler(play, pattern="^play$"))
     app.add_handler(CallbackQueryHandler(play_bot, pattern="^play_bot$"))
+    app.add_handler(CallbackQueryHandler(set_bot_difficulty, pattern="^bot_difficulty:(easy|medium|hard)$"))
     app.add_handler(
         CallbackQueryHandler(rps_choice, pattern="^rps:(rock|paper|scissors)$")
     )
