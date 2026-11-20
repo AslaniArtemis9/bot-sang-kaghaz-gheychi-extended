@@ -40,6 +40,48 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("multi-id", multi_rooms)
         self.assertNotIn("multi-id", friend_games)
 
+    def test_friend_game_blocks_entry_to_other_competitive_modes(self):
+        context = self.make_context()
+        bot.get_user_game(context)[42] = "friend-id"
+        self.assertTrue(bot.user_has_active_competitive_game(context, 42))
+        self.assertFalse(bot.user_has_active_competitive_game(context, 99))
+
+    def test_private_multi_room_blocks_entry_to_other_competitive_modes(self):
+        context = self.make_context()
+        bot.get_multi_rooms(context)["multi-id"] = {
+            "players": [42],
+            "status": "playing",
+        }
+        self.assertTrue(bot.user_has_active_competitive_game(context, 42))
+        self.assertFalse(bot.user_has_active_competitive_game(context, 99))
+
+    def test_group_two_player_blocks_entry_to_other_competitive_modes(self):
+        context = self.make_context()
+        bot.get_group_two_user_game(context)[42] = -100123
+        self.assertTrue(bot.user_has_active_competitive_game(context, 42))
+        self.assertFalse(bot.user_has_active_competitive_game(context, 99))
+
+    async def test_joining_friend_game_does_not_end_an_existing_competition(self):
+        context = self.make_context()
+        context.bot_data.update({
+            "games": {
+                "friend-target": {
+                    "players": [10], "status": "waiting",
+                    "names": {10: "Host"}, "scores": {10: 0},
+                    "choices": {}, "draws": 0, "round": 1, "msgs": {10: 1},
+                }
+            },
+            "multi_rooms": {"multi-active": {"players": [42], "status": "playing"}},
+        })
+        user = SimpleNamespace(id=42, first_name="Guest")
+        context.bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(bot, "safe_edit", new=AsyncMock()) as safe_edit:
+            await bot.join_game(context, user, "friend-target")
+        self.assertEqual(context.bot_data["games"]["friend-target"]["players"], [10])
+        self.assertEqual(context.bot_data["multi_rooms"]["multi-active"]["players"], [42])
+        context.bot.send_message.assert_awaited_once()
+        safe_edit.assert_not_awaited()
+
     async def test_nonparticipant_cannot_end_friend_game(self):
         game = {
             "players": [10, 20],
