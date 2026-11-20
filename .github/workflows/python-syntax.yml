@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - feature/multiplayer-stage-1
-      - feature/group-two-player-stage-2
+      - feature/multiplayer-stage-1
       - feature/bot-difficulty-stage-1
       - feature/group-two-player-stage-2
   pull_request:
     branches:
       - feature/multiplayer-stage-1
+      - feature/group-two-player-stage-2
 
 jobs:
   compile:
