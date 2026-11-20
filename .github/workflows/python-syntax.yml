@@ -8,6 +8,7 @@ on:
       - feature/group-two-player-stage-2
   pull_request:
     branches:
+      - main
       - feature/multiplayer-stage-1
       - feature/group-two-player-stage-2
 
