@@ -237,8 +237,8 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
             effective_user=query.from_user,
             effective_chat=SimpleNamespace(id=-100123, type="supergroup"),
         )
-        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
-             patch.object(bot, "schedule_group_two_timeout"), \\
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "schedule_group_two_timeout"), \
              patch.object(bot, "refresh_group_two_game", new=AsyncMock()) as refresh:
             await bot.group_two_join(update, context)
         self.assertEqual(game["players"], [1, 2])
@@ -258,8 +258,8 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
             effective_user=query.from_user,
             effective_chat=SimpleNamespace(id=-100123, type="group"),
         )
-        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
-             patch.object(bot, "safe_edit", new=AsyncMock()), \\
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "safe_edit", new=AsyncMock()), \
              patch.object(bot, "schedule_group_two_timeout"):
             await bot.group_two_choice(update, context)
         self.assertEqual(game["scores"], {1: 1, 2: 0})
@@ -279,8 +279,8 @@ class GroupTwoPlayerTests(unittest.IsolatedAsyncioTestCase):
             effective_user=query.from_user,
             effective_chat=SimpleNamespace(id=-100123, type="group"),
         )
-        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
-             patch.object(bot, "safe_edit", new=AsyncMock()), \\
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \
+             patch.object(bot, "safe_edit", new=AsyncMock()), \
              patch.object(bot, "record_result") as record:
             await bot.group_two_end(update, context)
         self.assertNotIn(-100123, context.bot_data["group_two_games"])
