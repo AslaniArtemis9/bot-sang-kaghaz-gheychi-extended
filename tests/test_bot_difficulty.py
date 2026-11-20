@@ -62,7 +62,7 @@ class BotDifficultyTests(unittest.TestCase):
         history = ["rock", "rock", "rock", "rock", "rock", "scissors"]
         self.assertEqual(
             choose_bot_move("hard", history, BEATS, rng),
-            "rock",
+            "paper",
         )
 
     def test_invalid_difficulty_is_rejected(self):
