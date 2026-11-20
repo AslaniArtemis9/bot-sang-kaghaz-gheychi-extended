@@ -1041,7 +1041,7 @@ def schedule_group_two_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
         return
     token = secrets.token_hex(8)
     game["round_token"] = token
-    context.application.create_task(
+    asyncio.create_task(
         group_two_round_timeout(context, chat_id, token),
         name=f"group-two-timeout-{chat_id}-{game['round']}",
     )
