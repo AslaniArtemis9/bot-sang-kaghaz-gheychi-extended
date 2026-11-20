@@ -1345,25 +1345,25 @@ async def set_bot_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @require_membership
 async def rps_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-
     user_choice = query.data.split(":")[1]
     if user_choice not in CHOICES:
         await query.answer("انتخاب نامعتبر است.", show_alert=True)
         return
+    await query.answer()
 
     match = get_bot_match(context)
+
+    # اگه بازی قبلی تموم شده بود، قبل از انتخاب حرکت ربات از اول شروع کن
+    if match["user"] >= WIN_SCORE or match["bot"] >= WIN_SCORE:
+        match = new_bot_match(context.user_data.get("bot_difficulty", "easy"))
+        context.user_data["bot_match"] = match
+
     bot_choice = choose_bot_move(
         match.get("difficulty", "easy"),
         match.get("history", []),
         beats=BEATS,
     )
     match.setdefault("history", []).append(user_choice)
-
-    # اگه بازی قبلی تموم شده بود، از اول شروع کن
-    if match["user"] >= WIN_SCORE or match["bot"] >= WIN_SCORE:
-        match = new_bot_match(context.user_data.get("bot_difficulty", "easy"))
-        context.user_data["bot_match"] = match
 
     if user_choice == bot_choice:
         match["draw"] += 1
