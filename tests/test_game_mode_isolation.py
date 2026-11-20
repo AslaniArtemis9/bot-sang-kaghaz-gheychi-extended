@@ -88,9 +88,9 @@ class GameModeIsolationTests(unittest.IsolatedAsyncioTestCase):
         )
         update = SimpleNamespace(callback_query=query, effective_user=query.from_user)
 
-        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)), \\
-             patch.object(bot, "end_game", new=AsyncMock()) as end_game:
-            await bot.friend_end(update, context)
+        with patch.object(bot, "is_member", new=AsyncMock(return_value=True)):
+            with patch.object(bot, "end_game", new=AsyncMock()) as end_game:
+                await bot.friend_end(update, context)
 
         end_game.assert_awaited_once_with(context, "1234abcd")
 
