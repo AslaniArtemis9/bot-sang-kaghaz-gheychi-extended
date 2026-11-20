@@ -619,7 +619,7 @@ def get_multi_rooms(context: ContextTypes.DEFAULT_TYPE) -> dict:
 
 def multi_room_text(room: dict) -> str:
     names = "\n".join(
-        f"{i}. {esc(room['names'][uid])}"
+        f"{i}. {esc(room['names'].get(uid, 'بازیکن'))}"
         for i, uid in enumerate(room["players"], 1)
     )
     return (
@@ -630,6 +630,28 @@ def multi_room_text(room: dict) -> str:
         "⏳ اتاق در انتظار ورود بازیکنان است.\n"
         "شروع مسابقه در مرحلهٔ بعدی فعال می‌شود."
     )
+
+
+def multi_player_keyboard(gid: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚪 خروج از اتاق", callback_data=f"multi_leave:{gid}")]
+    ])
+
+
+async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room:
+        return
+    text = multi_room_text(room)
+    for uid in list(room["players"]):
+        message_id = room["messages"].get(uid)
+        if not message_id:
+            continue
+        keyboard = (
+            multi_room_keyboard(gid, room["link"])
+            if uid == room["host"] else multi_player_keyboard(gid)
+        )
+        await safe_edit(context.bot, uid, message_id, text, keyboard)
 
 
 async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
@@ -647,18 +669,21 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
     if len(room["players"]) >= room["capacity"]:
         await context.bot.send_message(user.id, "ظرفیت این اتاق تکمیل شده است.")
         return
+    if any(user.id in other["players"] for other in rooms.values()):
+        await context.bot.send_message(
+            user.id, "ابتدا از اتاق چندنفرهٔ فعلی خود خارج شوید.",
+            reply_markup=back_keyboard()
+        )
+        return
 
     room["players"].append(user.id)
     room["names"][user.id] = user.first_name or "بازیکن"
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         user.id, multi_room_text(room), parse_mode=ParseMode.HTML,
-        reply_markup=back_keyboard()
+        reply_markup=multi_player_keyboard(gid)
     )
-    host = room["host"]
-    await safe_edit(
-        context.bot, host, room["host_message_id"], multi_room_text(room),
-        multi_room_keyboard(gid, room["link"])
-    )
+    room["messages"][user.id] = msg.message_id
+    await refresh_multi_room(context, gid)
 
 
 @require_membership
@@ -687,6 +712,7 @@ async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "host_message_id": query.message.message_id,
         "players": [user.id],
         "names": {user.id: user.first_name or "بازیکن"},
+        "messages": {user.id: query.message.message_id},
         "capacity": capacity,
         "status": "waiting",
         "link": link,
@@ -698,6 +724,33 @@ async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=multi_room_keyboard(gid, link),
         parse_mode=ParseMode.HTML
     )
+
+
+@require_membership
+async def multi_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    gid = query.data.split(":")[1]
+    room = get_multi_rooms(context).get(gid)
+    uid = query.from_user.id
+    if not room or room["status"] != "waiting":
+        await query.answer("این اتاق دیگر فعال نیست.", show_alert=True)
+        return
+    if uid == room["host"]:
+        await query.answer("سازنده نمی‌تواند خارج شود؛ در صورت نیاز اتاق را لغو کند.", show_alert=True)
+        return
+    if uid not in room["players"]:
+        await query.answer("شما عضو این اتاق نیستید.", show_alert=True)
+        return
+
+    room["players"].remove(uid)
+    room["names"].pop(uid, None)
+    room["messages"].pop(uid, None)
+    await query.answer("از اتاق خارج شدی.")
+    await query.edit_message_text(
+        "🚪 از اتاق چندنفره خارج شدی.",
+        reply_markup=play_back_keyboard()
+    )
+    await refresh_multi_room(context, gid)
 
 
 @require_membership
@@ -713,7 +766,14 @@ async def multi_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     get_multi_rooms(context).pop(gid, None)
     await query.answer("اتاق لغو شد.")
-    await query.edit_message_text("❌ اتاق چندنفره توسط سازنده لغو شد.")
+    for uid in list(room["players"]):
+        message_id = room["messages"].get(uid)
+        if message_id:
+            await safe_edit(
+                context.bot, uid, message_id,
+                "❌ اتاق چندنفره توسط سازنده لغو شد.",
+                play_back_keyboard()
+            )
 
 
 async def join_game(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
@@ -1222,6 +1282,7 @@ def main():
     app.add_handler(CallbackQueryHandler(play_multi, pattern="^play_multi$"))
     app.add_handler(CallbackQueryHandler(multi_create, pattern="^multi_cap:(3|[4-9]|1[0-9]|20)$"))
     app.add_handler(CallbackQueryHandler(multi_cancel, pattern="^multi_cancel:[0-9a-f]{8}$"))
+    app.add_handler(CallbackQueryHandler(multi_leave, pattern="^multi_leave:[0-9a-f]{8}$"))
     app.add_handler(
         CallbackQueryHandler(friend_choice, pattern="^fr:[0-9a-f]{8}:(rock|paper|scissors)$")
     )
