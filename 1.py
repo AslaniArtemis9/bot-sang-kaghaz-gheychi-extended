@@ -931,8 +931,15 @@ async def multi_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not 3 <= capacity <= 20:
         await query.answer("ظرفیت نامعتبر است.", show_alert=True)
         return
-    gid = secrets.token_hex(4)
     user = query.from_user
+    if any(user.id in room["players"] for room in get_multi_rooms(context).values()):
+        await query.answer(
+            "شما از قبل عضو یک اتاق چندنفره هستید؛ ابتدا آن را ترک یا لغو کنید.",
+            show_alert=True,
+        )
+        return
+
+    gid = secrets.token_hex(4)
     link = f"https://t.me/{context.bot.username}?start=mjoin_{gid}"
     room = {
         "host": user.id,
