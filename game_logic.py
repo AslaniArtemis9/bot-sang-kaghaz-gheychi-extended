@@ -26,3 +26,27 @@ def evaluate_multi_round(players, choices, beats):
         return set()
 
     return {uid for uid in responders if choices[uid] == winning_move}
+
+
+
+def evaluate_two_player_round(players, choices, beats):
+    """Return the winner ID, or None for a draw/no valid winner.
+
+    If exactly one of two players responds before the deadline, that
+    responder wins the round by forfeit. If neither responds, return None.
+    """
+    responders = [uid for uid in players if uid in choices]
+    if len(responders) == 1 and len(players) == 2:
+        return responders[0]
+    if len(responders) != 2:
+        return None
+
+    first, second = responders
+    first_move, second_move = choices[first], choices[second]
+    if first_move == second_move:
+        return None
+    if beats.get(first_move) == second_move:
+        return first
+    if beats.get(second_move) == first_move:
+        return second
+    return None
