@@ -20,6 +20,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from game_logic import evaluate_multi_round
+
 # ---------------- CONFIG ----------------
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(ENV_PATH, encoding="utf-8-sig", override=True)
@@ -739,7 +741,7 @@ async def resolve_multi_round(
     room = get_multi_rooms(context).get(gid)
     if not room or room["status"] != "playing":
         return
-    if expected_token is not None and room.get("round_token") != expected_token:
+    if expected_token is None or room.get("round_token") != expected_token:
         return
 
     players = list(room["players"])
@@ -747,24 +749,13 @@ async def resolve_multi_round(
     if not timed_out and len(choices) != len(players):
         return
 
+    # Invalidate this round before the first await so timeout and final-choice
+    # callbacks cannot resolve the same round twice.
+    room["round_token"] = None
+
     missing = [uid for uid in players if uid not in choices]
     responders = [uid for uid in players if uid in choices]
-    used = {choices[uid] for uid in responders}
-    winners = set()
-    if len(responders) == 1 and missing:
-        winners = {responders[0]}
-    elif len(used) == 2:
-        first, second = tuple(used)
-        if BEATS[first] == second:
-            winning_choice = first
-        elif BEATS[second] == first:
-            winning_choice = second
-        else:
-            winning_choice = None
-        if winning_choice:
-            winners = {
-                uid for uid in responders if choices[uid] == winning_choice
-            }
+    winners = evaluate_multi_round(players, choices, BEATS)
 
     if not responders:
         room["status"] = "finished"
@@ -981,10 +972,12 @@ async def multi_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.answer("انتخاب این دورت قبلاً ثبت شده است.")
         return
 
+    # Record the choice before yielding to Telegram. The timeout may wake
+    # immediately after this point, so the resolver is tied to this round token.
     room["choices"][uid] = choice
     await query.answer("انتخابت ثبت شد.")
     if len(room["choices"]) == len(room["players"]):
-        await resolve_multi_round(context, gid)
+        await resolve_multi_round(context, gid, expected_token=round_token)
     else:
         await refresh_multi_room(context, gid)
 
