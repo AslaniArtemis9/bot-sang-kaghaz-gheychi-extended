@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import os
@@ -52,6 +53,7 @@ BEATS = {
 
 # اولین کسی که به این تعداد امتیاز برسه، برنده‌ی بازی میشه
 WIN_SCORE = 3
+MULTI_ROUND_TIMEOUT_SECONDS = 30
 
 
 # ---------------- DATABASE ----------------
@@ -652,6 +654,7 @@ def multi_game_text(room: dict, uid: int, note: str = "") -> str:
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"🎲 دور {room['round']}\n"
         f"📊 انتخاب‌ها ثبت‌شده: {chosen} از {total}\n"
+        f"⏱ مهلت انتخاب: {MULTI_ROUND_TIMEOUT_SECONDS} ثانیه\n"
         f"🤝 دورهای مساوی: {room['draws']}\n\n"
         f"{scores}\n\n"
         f"{note}{choice_text}"
@@ -699,17 +702,54 @@ async def refresh_multi_room(context: ContextTypes.DEFAULT_TYPE, gid: str) -> No
         await safe_edit(context.bot, uid, message_id, text, keyboard)
 
 
-async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
+def schedule_multi_round_timeout(context: ContextTypes.DEFAULT_TYPE, gid: str) -> None:
     room = get_multi_rooms(context).get(gid)
     if not room or room["status"] != "playing":
+        return
+    token = secrets.token_hex(8)
+    room["round_token"] = token
+    context.application.create_task(
+        multi_round_timeout(context, gid, token),
+        name=f"multi-timeout-{gid}-{room['round']}",
+    )
+
+
+async def multi_round_timeout(
+    context: ContextTypes.DEFAULT_TYPE, gid: str, token: str
+) -> None:
+    await asyncio.sleep(MULTI_ROUND_TIMEOUT_SECONDS)
+    room = get_multi_rooms(context).get(gid)
+    if (
+        not room
+        or room["status"] != "playing"
+        or room.get("round_token") != token
+    ):
+        return
+    await resolve_multi_round(
+        context, gid, timed_out=True, expected_token=token
+    )
+
+
+async def resolve_multi_round(
+    context: ContextTypes.DEFAULT_TYPE,
+    gid: str,
+    timed_out: bool = False,
+    expected_token: str | None = None,
+) -> None:
+    room = get_multi_rooms(context).get(gid)
+    if not room or room["status"] != "playing":
+        return
+    if expected_token is not None and room.get("round_token") != expected_token:
         return
 
     players = list(room["players"])
     choices = dict(room["choices"])
-    if len(choices) != len(players):
+    if not timed_out and len(choices) != len(players):
         return
 
-    used = set(choices.values())
+    missing = [uid for uid in players if uid not in choices]
+    responders = [uid for uid in players if uid in choices]
+    used = {choices[uid] for uid in responders}
     winners = set()
     if len(used) == 2:
         first, second = tuple(used)
@@ -720,19 +760,40 @@ async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> N
         else:
             winning_choice = None
         if winning_choice:
-            winners = {uid for uid, choice in choices.items() if choice == winning_choice}
+            winners = {
+                uid for uid in responders if choices[uid] == winning_choice
+            }
+
+    missing_note = ""
+    if missing:
+        missing_names = "، ".join(
+            esc(room["names"].get(uid, "بازیکن")) for uid in missing
+        )
+        missing_note = (
+            f"⏰ مهلت تمام شد؛ این بازیکنان انتخاب نکردند و این دور را از دست دادند: "
+            f"{missing_names}.\n"
+        )
 
     if winners:
         for uid in winners:
             room["scores"][uid] += 1
         result_note = (
-            "🏆 برندهٔ این دور: "
+            missing_note
+            + "🏆 برندهٔ این دور: "
             + "، ".join(esc(room["names"].get(uid, "بازیکن")) for uid in winners)
             + "\n\n"
         )
+    elif len(responders) < 2:
+        result_note = (
+            missing_note
+            + "⚠️ برای تعیین برنده، حداقل دو انتخاب لازم بود؛ امتیازی داده نشد.\n\n"
+        )
     else:
         room["draws"] += 1
-        result_note = "🤝 این دور مساوی شد؛ امتیازی داده نشد.\n\n"
+        result_note = (
+            missing_note
+            + "🤝 این دور مساوی شد؛ امتیازی داده نشد.\n\n"
+        )
 
     room["last_choices"] = choices
     room["round"] += 1
@@ -741,6 +802,7 @@ async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> N
     champions = [uid for uid in players if room["scores"][uid] >= WIN_SCORE]
     if champions:
         room["status"] = "finished"
+        room["round_token"] = None
         champion_names = "، ".join(
             esc(room["names"].get(uid, "بازیکن")) for uid in champions
         )
@@ -764,15 +826,15 @@ async def resolve_multi_round(context: ContextTypes.DEFAULT_TYPE, gid: str) -> N
         return
 
     room["round_note"] = result_note
+    schedule_multi_round_timeout(context, gid)
     for uid in players:
         message_id = room["messages"].get(uid)
         if message_id:
             await safe_edit(
                 context.bot, uid, message_id,
                 multi_game_text(room, uid, note=result_note),
-                multi_player_keyboard(gid),
+                multi_player_keyboard(gid) if uid not in room["choices"] else None,
             )
-
 
 async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) -> None:
     rooms = get_multi_rooms(context)
@@ -873,6 +935,8 @@ async def multi_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     room["last_choices"] = {}
     room["final_texts"] = {}
     room["round_note"] = ""
+    room["round_token"] = None
+    schedule_multi_round_timeout(context, gid)
     await query.answer("مسابقه شروع شد!")
     await refresh_multi_room(context, gid)
 
