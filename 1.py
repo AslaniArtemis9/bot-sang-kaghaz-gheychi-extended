@@ -20,7 +20,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from game_logic import evaluate_multi_round
+from game_logic import evaluate_multi_round, evaluate_two_player_round
 from bot_strategy import choose_bot_move
 
 # ---------------- CONFIG ----------------
@@ -899,6 +899,347 @@ async def join_multi_room(context: ContextTypes.DEFAULT_TYPE, user, gid: str) ->
     )
     room["messages"][user.id] = msg.message_id
     await refresh_multi_room(context, gid)
+
+
+
+# ---------------- GROUP TWO-PLAYER MODE ----------------
+
+def get_group_two_games(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("group_two_games", {})
+
+
+def get_group_two_user_game(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.bot_data.setdefault("group_two_user_game", {})
+
+
+def group_two_text(game: dict, note: str = "") -> str:
+    players = game["players"]
+    names = "  🆚  ".join(esc(game["names"][uid]) for uid in players)
+    registered = len(game["choices"])
+    if game["status"] == "waiting":
+        return (
+            "<b>👥 مسابقهٔ دونفره در گروه</b>\\n\\n"
+            "━━━━━━━━━━━━━━━━━━\\n\\n"
+            f"👤 بازیکن اول: {esc(game['names'][players[0]])}\\n"
+            "⏳ منتظر ورود یک بازیکن دیگر...\\n\\n"
+            "برای شرکت، دکمهٔ «ورود به بازی» را بزنید."
+        )
+    if game["status"] == "playing":
+        return (
+            "<b>👥 مسابقهٔ دونفره در گروه</b>\\n\\n"
+            "━━━━━━━━━━━━━━━━━━\\n\\n"
+            f"{names}\\n\\n"
+            f"🎲 دور {game['round']}\\n"
+            f"🏆 {esc(game['names'][players[0]])}: {game['scores'][players[0]]}  |  "
+            f"{esc(game['names'][players[1]])}: {game['scores'][players[1]]}\\n"
+            f"🤝 مساوی: {game['draws']}\\n"
+            f"📥 انتخاب‌های ثبت‌شده: {registered}/2\\n"
+            f"⏱ مهلت هر دور: {MULTI_ROUND_TIMEOUT_SECONDS} ثانیه\\n\\n"
+            f"{note}"
+            "انتخاب‌ها تا پایان دور مخفی می‌مانند. حرکتت را انتخاب کن 👇"
+        )
+    return game.get("final_text", "<b>🏁 مسابقه تمام شد.</b>")
+
+
+def group_two_keyboard(gid: str, game: dict):
+    if game["status"] == "waiting":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🙋 ورود به بازی", callback_data=f"g2_join:{gid}")],
+            [InlineKeyboardButton("❌ لغو مسابقه", callback_data=f"g2_end:{gid}")],
+        ])
+    if game["status"] == "playing":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"{emoji} {name}",
+                    callback_data=f"g2_choice:{gid}:{game['round_token']}:{key}",
+                )
+                for key, (emoji, name) in CHOICES.items()
+            ],
+            [InlineKeyboardButton("🚪 پایان مسابقه", callback_data=f"g2_end:{gid}")],
+        ])
+    return None
+
+
+async def refresh_group_two_game(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if not game:
+        return
+    await safe_edit(
+        context.bot,
+        chat_id,
+        game["message_id"],
+        group_two_text(game, game.get("round_note", "")),
+        group_two_keyboard(game["gid"], game),
+    )
+
+
+def schedule_group_two_timeout(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    token = secrets.token_hex(8)
+    game["round_token"] = token
+    context.application.create_task(
+        group_two_round_timeout(context, chat_id, token),
+        name=f"group-two-timeout-{chat_id}-{game['round']}",
+    )
+
+
+async def group_two_round_timeout(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, token: str
+) -> None:
+    await asyncio.sleep(MULTI_ROUND_TIMEOUT_SECONDS)
+    game = get_group_two_games(context).get(chat_id)
+    if (
+        not game
+        or game["status"] != "playing"
+        or game.get("round_token") != token
+    ):
+        return
+    await resolve_group_two_round(
+        context, chat_id, timed_out=True, expected_token=token
+    )
+
+
+async def resolve_group_two_round(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    timed_out: bool = False,
+    expected_token=None,
+) -> None:
+    game = get_group_two_games(context).get(chat_id)
+    if (
+        not game
+        or game["status"] != "playing"
+        or expected_token is None
+        or game.get("round_token") != expected_token
+    ):
+        return
+
+    players = list(game["players"])
+    choices = dict(game["choices"])
+    if not timed_out and len(choices) != 2:
+        return
+
+    # Invalidate before awaiting Telegram so a timeout/callback cannot score twice.
+    game["round_token"] = None
+    winner = evaluate_two_player_round(players, choices, BEATS)
+
+    if not choices:
+        game["status"] = "finished"
+        game["final_text"] = (
+            "<b>🏁 مسابقه متوقف شد.</b>\\n\\n"
+            "هیچ‌کدام از بازیکنان در مهلت مقرر انتخاب نکردند."
+        )
+        await refresh_group_two_game(context, chat_id)
+        get_group_two_games(context).pop(chat_id, None)
+        for uid in players:
+            get_group_two_user_game(context).pop(uid, None)
+        return
+
+    result_note = ""
+    if timed_out and len(choices) == 1:
+        result_note = "⏰ مهلت تمام شد؛ بازیکنی که انتخاب کرد این دور را برد.\\n\\n"
+    if winner is None:
+        game["draws"] += 1
+        result_note += "🤝 این دور مساوی شد.\\n\\n"
+    else:
+        game["scores"][winner] += 1
+        result_note += f"🏆 برندهٔ این دور: {esc(game['names'][winner])}\\n\\n"
+
+    reveal = []
+    for uid in players:
+        if uid in choices:
+            emoji, name = CHOICES[choices[uid]]
+            reveal.append(f"{esc(game['names'][uid])}: {emoji} {name}")
+        else:
+            reveal.append(f"{esc(game['names'][uid])}: انتخاب نکرد")
+    result_note += "🔎 نتیجهٔ انتخاب‌ها:\\n" + "\\n".join(reveal) + "\\n\\n"
+
+    game["round"] += 1
+    game["choices"] = {}
+    champions = [uid for uid in players if game["scores"][uid] >= WIN_SCORE]
+    if champions:
+        game["status"] = "finished"
+        champion = champions[0]
+        game["final_text"] = (
+            "<b>🏁 مسابقه تمام شد!</b>\\n\\n"
+            f"🏆 برندهٔ نهایی: {esc(game['names'][champion])}\\n"
+            f"📊 نتیجه: {esc(game['names'][players[0]])} "
+            f"{game['scores'][players[0]]} - {game['scores'][players[1]]} "
+            f"{esc(game['names'][players[1]])}"
+        )
+        for uid in players:
+            record_result(
+                uid,
+                game["names"][uid],
+                won=(uid == champion),
+            )
+        game["round_note"] = result_note
+        await refresh_group_two_game(context, chat_id)
+        get_group_two_games(context).pop(chat_id, None)
+        for uid in players:
+            get_group_two_user_game(context).pop(uid, None)
+        return
+
+    game["round_note"] = result_note
+    schedule_group_two_timeout(context, chat_id)
+    await refresh_group_two_game(context, chat_id)
+
+
+@require_membership
+async def group_game_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text(
+            "این دستور را داخل گروه تلگرام اجرا کن."
+        )
+        return
+
+    games = get_group_two_games(context)
+    existing = games.get(chat.id)
+    if existing:
+        await update.message.reply_text(
+            "در این گروه یک مسابقهٔ دونفره فعال یا در حال انتظار است."
+        )
+        return
+
+    user_games = get_group_two_user_game(context)
+    if user.id in user_games:
+        await update.message.reply_text(
+            "شما در حال حاضر در یک مسابقهٔ گروهی دیگر شرکت دارید."
+        )
+        return
+
+    gid = secrets.token_hex(4)
+    game = {
+        "gid": gid,
+        "chat_id": chat.id,
+        "message_id": None,
+        "host": user.id,
+        "players": [user.id],
+        "names": {user.id: user.first_name or "بازیکن"},
+        "scores": {user.id: 0},
+        "choices": {},
+        "draws": 0,
+        "round": 1,
+        "round_token": None,
+        "round_note": "",
+        "status": "waiting",
+    }
+    message = await update.message.reply_text(
+        group_two_text(game),
+        reply_markup=group_two_keyboard(gid, game),
+        parse_mode=ParseMode.HTML,
+    )
+    game["message_id"] = message.message_id
+    games[chat.id] = game
+    user_games[user.id] = chat.id
+
+
+@require_membership
+async def group_two_join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    game = get_group_two_games(context).get(chat.id)
+    gid = query.data.split(":")[1]
+    if not game or game["gid"] != gid or game["status"] != "waiting":
+        await query.answer("این مسابقه دیگر در انتظار بازیکن نیست.", show_alert=True)
+        return
+    uid = query.from_user.id
+    if uid == game["host"]:
+        await query.answer("سازندهٔ مسابقه از قبل بازیکن اول است.", show_alert=True)
+        return
+    if uid in get_group_two_user_game(context):
+        await query.answer("شما در یک مسابقهٔ گروهی دیگر شرکت دارید.", show_alert=True)
+        return
+
+    game["players"].append(uid)
+    game["names"][uid] = query.from_user.first_name or "بازیکن"
+    game["scores"][uid] = 0
+    get_group_two_user_game(context)[uid] = chat.id
+    game["status"] = "playing"
+    schedule_group_two_timeout(context, chat.id)
+    await query.answer("وارد مسابقه شدی؛ بازی شروع شد!")
+    await refresh_group_two_game(context, chat.id)
+
+
+@require_membership
+async def group_two_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    _, gid, token, choice = query.data.split(":")
+    game = get_group_two_games(context).get(chat.id)
+    uid = query.from_user.id
+    if (
+        not game
+        or game["gid"] != gid
+        or game["status"] != "playing"
+        or uid not in game["players"]
+        or game.get("round_token") != token
+    ):
+        await query.answer("این انتخاب دیگر معتبر نیست.", show_alert=True)
+        return
+    if uid in game["choices"]:
+        await query.answer("انتخابت قبلاً ثبت شده است.", show_alert=True)
+        return
+    if choice not in CHOICES:
+        await query.answer("حرکت نامعتبر است.", show_alert=True)
+        return
+
+    game["choices"][uid] = choice
+    await query.answer("انتخابت مخفیانه ثبت شد.")
+    if len(game["choices"]) == 2:
+        await resolve_group_two_round(
+            context, chat.id, expected_token=token
+        )
+    else:
+        await refresh_group_two_game(context, chat.id)
+
+
+@require_membership
+async def group_two_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await query.answer("این دکمه فقط داخل گروه معتبر است.", show_alert=True)
+        return
+    gid = query.data.split(":")[1]
+    game = get_group_two_games(context).get(chat.id)
+    uid = query.from_user.id
+    if not game or game["gid"] != gid:
+        await query.answer("این مسابقه دیگر فعال نیست.", show_alert=True)
+        return
+    if uid not in game["players"]:
+        await query.answer("فقط بازیکنان مسابقه می‌توانند آن را پایان دهند.", show_alert=True)
+        return
+
+    await query.answer("مسابقه پایان یافت.")
+    if game["status"] == "playing" and len(game["players"]) == 2:
+        other = next(pid for pid in game["players"] if pid != uid)
+        game["final_text"] = (
+            "<b>🏁 مسابقه با انصراف پایان یافت.</b>\\n\\n"
+            f"🏆 برنده: {esc(game['names'][other])}"
+        )
+        for pid in game["players"]:
+            record_result(pid, game["names"][pid], won=(pid == other))
+    else:
+        game["final_text"] = "<b>❌ مسابقه توسط سازنده لغو شد.</b>"
+
+    game["status"] = "finished"
+    game["round_token"] = None
+    await refresh_group_two_game(context, chat.id)
+    get_group_two_games(context).pop(chat.id, None)
+    for pid in game["players"]:
+        get_group_two_user_game(context).pop(pid, None)
 
 
 # ---------------- DECORATOR ----------------
