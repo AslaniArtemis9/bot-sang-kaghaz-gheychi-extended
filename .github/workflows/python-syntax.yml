@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/multiplayer-stage-1
+      - feature/bot-difficulty-stage-1
   pull_request:
     branches:
       - feature/multiplayer-stage-1
@@ -23,6 +24,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Compile Python source
-        run: python -m py_compile 1.py game_logic.py
+        run: python -m py_compile 1.py game_logic.py bot_strategy.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
